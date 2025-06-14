@@ -95,6 +95,8 @@ from admin import (
     # Product type message handlers
     handle_adm_new_type_name_message, handle_adm_new_type_emoji_message,
     handle_adm_new_type_description_message, handle_adm_edit_type_emoji_message,
+    # User search handlers
+    handle_adm_search_user_start, handle_adm_search_username_message,
 )
 from viewer_admin import (
     handle_viewer_admin_menu,
@@ -279,6 +281,9 @@ def callback_query_router(func):
 
                 # Stock Handler (from stock.py)
                 "view_stock": handle_view_stock,
+                
+                # User Search Handlers (from admin.py)
+                "adm_search_user_start": admin.handle_adm_search_user_start,
             }
 
             target_func = KNOWN_HANDLERS.get(command)
@@ -345,6 +350,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Reseller Management States (from reseller_management.py)
         'awaiting_reseller_manage_id': handle_reseller_manage_id_message,
         'awaiting_reseller_discount_percent': handle_reseller_percent_message,
+        
+        # User Search States (from admin.py)
+        'awaiting_search_username': admin.handle_adm_search_username_message,
     }
 
     handler_func = STATE_HANDLERS.get(state)

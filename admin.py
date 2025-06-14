@@ -437,6 +437,7 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         [InlineKeyboardButton("📦 Bulk Add Products", callback_data="adm_bulk_city")],
         [InlineKeyboardButton("🗑️ Manage Products", callback_data="adm_manage_products")],
         [InlineKeyboardButton("👥 Manage Users", callback_data="adm_manage_users|0")],
+        [InlineKeyboardButton("🔍 Search User", callback_data="adm_search_user_start")],
         [InlineKeyboardButton("👑 Manage Resellers", callback_data="manage_resellers_menu")],
         [InlineKeyboardButton("🏷️ Manage Reseller Discounts", callback_data="manage_reseller_discounts_select_reseller|0")],
         [InlineKeyboardButton("🏷️ Manage Discount Codes", callback_data="adm_manage_discounts")],
@@ -4259,3 +4260,284 @@ async def handle_adm_bulk_drop_details_message(update: Update, context: ContextT
         
         # Show updated status
         await show_bulk_messages_status(update, context)
+
+
+# --- User Search Handlers ---
+async def handle_adm_search_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Starts the user search process by prompting for username."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID: 
+        return await query.answer("Access denied.", show_alert=True)
+    
+    context.user_data['state'] = 'awaiting_search_username'
+    
+    prompt_msg = (
+        "🔍 Search User by Username\n\n"
+        "Please reply with the Telegram username (without @) or User ID of the person you want to search for.\n\n"
+        "Examples:\n"
+        "• username123\n"
+        "• 123456789 (User ID)"
+    )
+    
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="admin_menu")]]
+    
+    await query.edit_message_text(prompt_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    await query.answer("Enter username or User ID in chat.")
+
+
+async def handle_adm_search_username_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the admin entering a username or User ID for search."""
+    admin_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    if admin_id != ADMIN_ID: 
+        return
+    if context.user_data.get("state") != 'awaiting_search_username': 
+        return
+    if not update.message or not update.message.text: 
+        return
+
+    search_term = update.message.text.strip()
+    
+    # Clear state
+    context.user_data.pop('state', None)
+    
+    # Try to find user by username or user ID
+    conn = None
+    user_info = None
+    search_by_id = False
+    
+    try:
+        # Check if search term is a number (User ID)
+        try:
+            user_id_search = int(search_term)
+            search_by_id = True
+        except ValueError:
+            search_by_id = False
+        
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        if search_by_id:
+            # Search by User ID
+            c.execute("SELECT user_id, username, balance, total_purchases, is_banned, is_reseller FROM users WHERE user_id = ?", (user_id_search,))
+        else:
+            # Search by username (case insensitive)
+            c.execute("SELECT user_id, username, balance, total_purchases, is_banned, is_reseller FROM users WHERE LOWER(username) = LOWER(?)", (search_term,))
+        
+        user_info = c.fetchone()
+        
+    except sqlite3.Error as e:
+        logger.error(f"DB error searching for user '{search_term}': {e}")
+        await send_message_with_retry(context.bot, chat_id, "❌ Database error during search.", parse_mode=None)
+        return
+    finally:
+        if conn: 
+            conn.close()
+    
+    if not user_info:
+        search_type = "User ID" if search_by_id else "username"
+        await send_message_with_retry(
+            context.bot, chat_id, 
+            f"❌ No user found with {search_type}: {search_term}\n\nPlease check the spelling or try a different search term.",
+            parse_mode=None
+        )
+        
+        # Offer to search again
+        keyboard = [
+            [InlineKeyboardButton("🔍 Search Again", callback_data="adm_search_user_start")],
+            [InlineKeyboardButton("⬅️ Admin Menu", callback_data="admin_menu")]
+        ]
+        await send_message_with_retry(
+            context.bot, chat_id, 
+            "What would you like to do?", 
+            reply_markup=InlineKeyboardMarkup(keyboard), 
+            parse_mode=None
+        )
+        return
+    
+    # User found - display comprehensive information
+    await display_user_search_results(context.bot, chat_id, user_info)
+
+
+async def display_user_search_results(bot, chat_id: int, user_info: dict):
+    """Displays comprehensive user information including deposits, purchases, and transaction history."""
+    user_id = user_info['user_id']
+    username = user_info['username'] or f"ID_{user_id}"
+    balance = Decimal(str(user_info['balance']))
+    total_purchases = user_info['total_purchases']
+    is_banned = user_info['is_banned'] == 1
+    is_reseller = user_info['is_reseller'] == 1
+    
+    # Get user status and progress
+    status = get_user_status(total_purchases)
+    progress_bar = get_progress_bar(total_purchases)
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Get recent purchases (last 10)
+        c.execute("""
+            SELECT purchase_date, product_name, product_type, product_size, price_paid, city, district
+            FROM purchases 
+            WHERE user_id = ? 
+            ORDER BY purchase_date DESC 
+            LIMIT 10
+        """, (user_id,))
+        recent_purchases = c.fetchall()
+        
+        # Get pending deposits
+        c.execute("""
+            SELECT payment_id, currency, target_eur_amount, expected_crypto_amount, created_at, is_purchase
+            FROM pending_deposits 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT 5
+        """, (user_id,))
+        pending_deposits = c.fetchall()
+        
+        # Get admin log entries for this user (balance adjustments, bans, etc.)
+        c.execute("""
+            SELECT timestamp, action, reason, amount_change, old_value, new_value
+            FROM admin_log 
+            WHERE target_user_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT 10
+        """, (user_id,))
+        admin_actions = c.fetchall()
+        
+        # Calculate total spent
+        c.execute("SELECT COALESCE(SUM(price_paid), 0.0) as total_spent FROM purchases WHERE user_id = ?", (user_id,))
+        total_spent_result = c.fetchone()
+        total_spent = Decimal(str(total_spent_result['total_spent'])) if total_spent_result else Decimal('0.0')
+        
+        # Get reseller discount info if applicable
+        reseller_discounts = []
+        if is_reseller:
+            c.execute("""
+                SELECT product_type, discount_percentage 
+                FROM reseller_discounts 
+                WHERE reseller_user_id = ? 
+                ORDER BY product_type
+            """, (user_id,))
+            reseller_discounts = c.fetchall()
+        
+    except sqlite3.Error as e:
+        logger.error(f"DB error fetching user details for {user_id}: {e}", exc_info=True)
+        await send_message_with_retry(bot, chat_id, "❌ Error fetching user details.", parse_mode=None)
+        return
+    finally:
+        if conn: 
+            conn.close()
+    
+    # Build comprehensive message
+    banned_str = "Yes 🚫" if is_banned else "No ✅"
+    reseller_str = "Yes 👑" if is_reseller else "No"
+    balance_str = format_currency(balance)
+    total_spent_str = format_currency(total_spent)
+    
+    msg = f"🔍 User Search Results\n\n"
+    msg += f"👤 User: @{username} (ID: {user_id})\n"
+    msg += f"📊 Status: {status} {progress_bar}\n"
+    msg += f"💰 Balance: {balance_str} EUR\n"
+    msg += f"💸 Total Spent: {total_spent_str} EUR\n"
+    msg += f"📦 Total Purchases: {total_purchases}\n"
+    msg += f"🚫 Banned: {banned_str}\n"
+    msg += f"👑 Reseller: {reseller_str}\n"
+    
+    # Add reseller discount info
+    if is_reseller and reseller_discounts:
+        msg += f"\n🏷️ Reseller Discounts:\n"
+        for discount in reseller_discounts:
+            product_type = discount['product_type']
+            percentage = discount['discount_percentage']
+            emoji = PRODUCT_TYPES.get(product_type, DEFAULT_PRODUCT_EMOJI)
+            msg += f"  {emoji} {product_type}: {percentage}%\n"
+    
+    # Add pending deposits info
+    if pending_deposits:
+        msg += f"\n⏳ Pending Deposits ({len(pending_deposits)}):\n"
+        for deposit in pending_deposits[:3]:  # Show only first 3
+            payment_id = deposit['payment_id'][:8] + "..."  # Truncate payment ID
+            currency = deposit['currency'].upper()
+            amount = format_currency(deposit['target_eur_amount'])
+            deposit_type = "Purchase" if deposit['is_purchase'] else "Refill"
+            try:
+                created_dt = datetime.fromisoformat(deposit['created_at'].replace('Z', '+00:00'))
+                if created_dt.tzinfo is None: 
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                date_str = created_dt.strftime('%m-%d %H:%M')
+            except (ValueError, TypeError): 
+                date_str = "???"
+            msg += f"  • {date_str}: {amount}€ ({currency}) - {deposit_type}\n"
+        
+        if len(pending_deposits) > 3:
+            msg += f"  ... and {len(pending_deposits) - 3} more\n"
+    
+    # Add recent purchases
+    if recent_purchases:
+        msg += f"\n📜 Recent Purchases ({len(recent_purchases)}):\n"
+        for purchase in recent_purchases[:5]:  # Show only first 5
+            try:
+                dt_obj = datetime.fromisoformat(purchase['purchase_date'].replace('Z', '+00:00'))
+                if dt_obj.tzinfo is None: 
+                    dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+                date_str = dt_obj.strftime('%m-%d %H:%M')
+            except (ValueError, TypeError): 
+                date_str = "???"
+            
+            p_type = purchase['product_type']
+            p_emoji = PRODUCT_TYPES.get(p_type, DEFAULT_PRODUCT_EMOJI)
+            p_size = purchase['product_size'] or 'N/A'
+            p_price = format_currency(purchase['price_paid'])
+            p_city = purchase['city'] or 'N/A'
+            p_district = purchase['district'] or 'N/A'
+            
+            msg += f"  • {date_str}: {p_emoji} {p_size} - {p_price}€\n"
+            msg += f"    📍 {p_city}/{p_district}\n"
+        
+        if len(recent_purchases) > 5:
+            msg += f"  ... and {len(recent_purchases) - 5} more\n"
+    else:
+        msg += f"\n📜 Recent Purchases: None\n"
+    
+    # Add admin actions if any
+    if admin_actions:
+        msg += f"\n🔧 Recent Admin Actions ({len(admin_actions)}):\n"
+        for action in admin_actions[:3]:  # Show only first 3
+            try:
+                action_dt = datetime.fromisoformat(action['timestamp'].replace('Z', '+00:00'))
+                if action_dt.tzinfo is None: 
+                    action_dt = action_dt.replace(tzinfo=timezone.utc)
+                date_str = action_dt.strftime('%m-%d %H:%M')
+            except (ValueError, TypeError): 
+                date_str = "???"
+            
+            action_name = action['action']
+            reason = action['reason'] or 'No reason'
+            amount_change = action['amount_change']
+            
+            msg += f"  • {date_str}: {action_name}\n"
+            if amount_change:
+                msg += f"    💰 Amount: {format_currency(amount_change)}€\n"
+            msg += f"    📝 Reason: {reason}\n"
+        
+        if len(admin_actions) > 3:
+            msg += f"  ... and {len(admin_actions) - 3} more\n"
+    
+    # Split message if too long
+    if len(msg) > 4000:
+        msg = msg[:4000] + "\n\n✂️ ... Message truncated due to length."
+    
+    # Create action buttons
+    keyboard = [
+        [InlineKeyboardButton("💰 Adjust Balance", callback_data=f"adm_adjust_balance_start|{user_id}|0")],
+        [InlineKeyboardButton("🚫 Ban/Unban User", callback_data=f"adm_toggle_ban|{user_id}|0")],
+        [InlineKeyboardButton("👤 View Full Profile", callback_data=f"adm_view_user|{user_id}|0")],
+        [InlineKeyboardButton("🔍 Search Another User", callback_data="adm_search_user_start")],
+        [InlineKeyboardButton("⬅️ Admin Menu", callback_data="admin_menu")]
+    ]
+    
+    await send_message_with_retry(bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
