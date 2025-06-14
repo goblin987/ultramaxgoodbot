@@ -436,7 +436,6 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         [InlineKeyboardButton("➕ Add Products", callback_data="adm_city")],
         [InlineKeyboardButton("📦 Bulk Add Products", callback_data="adm_bulk_city")],
         [InlineKeyboardButton("🗑️ Manage Products", callback_data="adm_manage_products")],
-        [InlineKeyboardButton("👥 Manage Users", callback_data="adm_manage_users|0")],
         [InlineKeyboardButton("🔍 Search User", callback_data="adm_search_user_start")],
         [InlineKeyboardButton("👑 Manage Resellers", callback_data="manage_resellers_menu")],
         [InlineKeyboardButton("🏷️ Manage Reseller Discounts", callback_data="manage_reseller_discounts_select_reseller|0")],
@@ -4272,10 +4271,10 @@ async def handle_adm_search_user_start(update: Update, context: ContextTypes.DEF
     context.user_data['state'] = 'awaiting_search_username'
     
     prompt_msg = (
-        "🔍 Search User by Username\n\n"
-        "Please reply with the Telegram username (without @) or User ID of the person you want to search for.\n\n"
+        "🔍 Search User by Username or ID\n\n"
+        "Please reply with the Telegram username (with or without @) or User ID of the person you want to search for.\n\n"
         "Examples:\n"
-        "• username123\n"
+        "• @username123 or username123\n"
         "• 123456789 (User ID)"
     )
     
@@ -4298,6 +4297,10 @@ async def handle_adm_search_username_message(update: Update, context: ContextTyp
         return
 
     search_term = update.message.text.strip()
+    
+    # Remove @ symbol if present
+    if search_term.startswith('@'):
+        search_term = search_term[1:]
     
     # Clear state
     context.user_data.pop('state', None)
@@ -4346,6 +4349,7 @@ async def handle_adm_search_username_message(update: Update, context: ContextTyp
         # Offer to search again
         keyboard = [
             [InlineKeyboardButton("🔍 Search Again", callback_data="adm_search_user_start")],
+            [InlineKeyboardButton("👥 Browse All Users", callback_data="adm_manage_users|0")],
             [InlineKeyboardButton("⬅️ Admin Menu", callback_data="admin_menu")]
         ]
         await send_message_with_retry(
@@ -4537,6 +4541,7 @@ async def display_user_search_results(bot, chat_id: int, user_info: dict):
         [InlineKeyboardButton("🚫 Ban/Unban User", callback_data=f"adm_toggle_ban|{user_id}|0")],
         [InlineKeyboardButton("👤 View Full Profile", callback_data=f"adm_view_user|{user_id}|0")],
         [InlineKeyboardButton("🔍 Search Another User", callback_data="adm_search_user_start")],
+        [InlineKeyboardButton("👥 Browse All Users", callback_data="adm_manage_users|0")],
         [InlineKeyboardButton("⬅️ Admin Menu", callback_data="admin_menu")]
     ]
     
