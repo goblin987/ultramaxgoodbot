@@ -4365,7 +4365,7 @@ async def handle_adm_search_username_message(update: Update, context: ContextTyp
 
 
 async def display_user_search_results(bot, chat_id: int, user_info: dict):
-    """Displays comprehensive user information including deposits, purchases, and transaction history."""
+    """Displays user overview with buttons to view detailed sections."""
     user_id = user_info['user_id']
     username = user_info['username'] or f"ID_{user_id}"
     balance = Decimal(str(user_info['balance']))
@@ -4382,115 +4382,232 @@ async def display_user_search_results(bot, chat_id: int, user_info: dict):
         conn = get_db_connection()
         c = conn.cursor()
         
-        # Get recent purchases (last 10)
-        c.execute("""
-            SELECT purchase_date, product_name, product_type, product_size, price_paid, city, district
-            FROM purchases 
-            WHERE user_id = ? 
-            ORDER BY purchase_date DESC 
-            LIMIT 10
-        """, (user_id,))
-        recent_purchases = c.fetchall()
+        # Get counts for different sections
+        c.execute("SELECT COUNT(*) as count FROM purchases WHERE user_id = ?", (user_id,))
+        total_purchases_count = c.fetchone()['count']
         
-        # Get pending deposits
-        c.execute("""
-            SELECT payment_id, currency, target_eur_amount, expected_crypto_amount, created_at, is_purchase
-            FROM pending_deposits 
-            WHERE user_id = ? 
-            ORDER BY created_at DESC 
-            LIMIT 5
-        """, (user_id,))
-        pending_deposits = c.fetchall()
+        c.execute("SELECT COUNT(*) as count FROM pending_deposits WHERE user_id = ?", (user_id,))
+        pending_deposits_count = c.fetchone()['count']
         
-        # Get admin log entries for this user (balance adjustments, bans, etc.)
-        c.execute("""
-            SELECT timestamp, action, reason, amount_change, old_value, new_value
-            FROM admin_log 
-            WHERE target_user_id = ? 
-            ORDER BY timestamp DESC 
-            LIMIT 10
-        """, (user_id,))
-        admin_actions = c.fetchall()
+        c.execute("SELECT COUNT(*) as count FROM admin_log WHERE target_user_id = ?", (user_id,))
+        admin_actions_count = c.fetchone()['count']
         
         # Calculate total spent
         c.execute("SELECT COALESCE(SUM(price_paid), 0.0) as total_spent FROM purchases WHERE user_id = ?", (user_id,))
         total_spent_result = c.fetchone()
         total_spent = Decimal(str(total_spent_result['total_spent'])) if total_spent_result else Decimal('0.0')
         
-        # Get reseller discount info if applicable
-        reseller_discounts = []
-        if is_reseller:
-            c.execute("""
-                SELECT product_type, discount_percentage 
-                FROM reseller_discounts 
-                WHERE reseller_user_id = ? 
-                ORDER BY product_type
-            """, (user_id,))
-            reseller_discounts = c.fetchall()
-        
     except sqlite3.Error as e:
-        logger.error(f"DB error fetching user details for {user_id}: {e}", exc_info=True)
+        logger.error(f"DB error fetching user overview for {user_id}: {e}", exc_info=True)
         await send_message_with_retry(bot, chat_id, "❌ Error fetching user details.", parse_mode=None)
         return
     finally:
         if conn: 
             conn.close()
     
-    # Build comprehensive message
+    # Build overview message
     banned_str = "Yes 🚫" if is_banned else "No ✅"
     reseller_str = "Yes 👑" if is_reseller else "No"
     balance_str = format_currency(balance)
     total_spent_str = format_currency(total_spent)
     
-    msg = f"🔍 User Search Results\n\n"
+    msg = f"🔍 User Overview\n\n"
     msg += f"👤 User: @{username} (ID: {user_id})\n"
     msg += f"📊 Status: {status} {progress_bar}\n"
     msg += f"💰 Balance: {balance_str} EUR\n"
     msg += f"💸 Total Spent: {total_spent_str} EUR\n"
-    msg += f"📦 Total Purchases: {total_purchases}\n"
+    msg += f"📦 Total Purchases: {total_purchases_count}\n"
     msg += f"🚫 Banned: {banned_str}\n"
-    msg += f"👑 Reseller: {reseller_str}\n"
+    msg += f"👑 Reseller: {reseller_str}\n\n"
     
-    # Add reseller discount info
-    if is_reseller and reseller_discounts:
-        msg += f"\n🏷️ Reseller Discounts:\n"
-        for discount in reseller_discounts:
-            product_type = discount['product_type']
-            percentage = discount['discount_percentage']
-            emoji = PRODUCT_TYPES.get(product_type, DEFAULT_PRODUCT_EMOJI)
-            msg += f"  {emoji} {product_type}: {percentage}%\n"
+    msg += f"📋 Available Details:\n"
+    if pending_deposits_count > 0:
+        msg += f"⏳ Pending Deposits: {pending_deposits_count}\n"
+    if total_purchases_count > 0:
+        msg += f"📜 Purchase History: {total_purchases_count}\n"
+    if admin_actions_count > 0:
+        msg += f"🔧 Admin Actions: {admin_actions_count}\n"
+    if is_reseller:
+        msg += f"🏷️ Reseller Discounts\n"
     
-    # Add pending deposits info
-    if pending_deposits:
-        msg += f"\n⏳ Pending Deposits ({len(pending_deposits)}):\n"
-        for deposit in pending_deposits[:3]:  # Show only first 3
-            payment_id = deposit['payment_id'][:8] + "..."  # Truncate payment ID
+    msg += f"\nSelect a section to view detailed information:"
+    
+    # Create section buttons
+    keyboard = []
+    
+    # First row - Quick actions
+    keyboard.append([
+        InlineKeyboardButton("💰 Adjust Balance", callback_data=f"adm_adjust_balance_start|{user_id}|0"),
+        InlineKeyboardButton("🚫 Ban/Unban", callback_data=f"adm_toggle_ban|{user_id}|0")
+    ])
+    
+    # Detail sections
+    detail_buttons = []
+    if pending_deposits_count > 0:
+        detail_buttons.append(InlineKeyboardButton(f"⏳ Deposits ({pending_deposits_count})", callback_data=f"adm_user_deposits|{user_id}"))
+    if total_purchases_count > 0:
+        detail_buttons.append(InlineKeyboardButton(f"📜 Purchases ({total_purchases_count})", callback_data=f"adm_user_purchases|{user_id}|0"))
+    
+    # Split detail buttons into rows of 2
+    for i in range(0, len(detail_buttons), 2):
+        keyboard.append(detail_buttons[i:i+2])
+    
+    if admin_actions_count > 0:
+        keyboard.append([InlineKeyboardButton(f"🔧 Admin Actions ({admin_actions_count})", callback_data=f"adm_user_actions|{user_id}|0")])
+    
+    if is_reseller:
+        keyboard.append([InlineKeyboardButton("🏷️ Reseller Discounts", callback_data=f"adm_user_discounts|{user_id}")])
+    
+    # Navigation buttons
+    keyboard.append([
+        InlineKeyboardButton("🔍 Search Another", callback_data="adm_search_user_start"),
+        InlineKeyboardButton("👥 Browse All", callback_data="adm_manage_users|0")
+    ])
+    keyboard.append([InlineKeyboardButton("⬅️ Admin Menu", callback_data="admin_menu")])
+    
+    await send_message_with_retry(bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+
+# --- Detailed User Information Handlers ---
+async def handle_adm_user_deposits(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Shows detailed pending deposits for a user."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID: 
+        return await query.answer("Access denied.", show_alert=True)
+    
+    if not params or not params[0].isdigit():
+        return await query.answer("Error: Invalid user ID.", show_alert=True)
+    
+    user_id = int(params[0])
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Get user info
+        c.execute("SELECT username FROM users WHERE user_id = ?", (user_id,))
+        user_result = c.fetchone()
+        if not user_result:
+            return await query.answer("User not found.", show_alert=True)
+        
+        username = user_result['username'] or f"ID_{user_id}"
+        
+        # Get all pending deposits
+        c.execute("""
+            SELECT payment_id, currency, target_eur_amount, expected_crypto_amount, created_at, is_purchase
+            FROM pending_deposits 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC
+        """, (user_id,))
+        deposits = c.fetchall()
+        
+    except sqlite3.Error as e:
+        logger.error(f"DB error fetching deposits for user {user_id}: {e}", exc_info=True)
+        await query.answer("Database error.", show_alert=True)
+        return
+    finally:
+        if conn: 
+            conn.close()
+    
+    msg = f"⏳ Pending Deposits - @{username}\n\n"
+    
+    if not deposits:
+        msg += "No pending deposits found."
+    else:
+        for i, deposit in enumerate(deposits, 1):
+            payment_id = deposit['payment_id'][:12] + "..."
             currency = deposit['currency'].upper()
             amount = format_currency(deposit['target_eur_amount'])
+            expected_crypto = deposit['expected_crypto_amount']
             deposit_type = "Purchase" if deposit['is_purchase'] else "Refill"
+            
             try:
                 created_dt = datetime.fromisoformat(deposit['created_at'].replace('Z', '+00:00'))
                 if created_dt.tzinfo is None: 
                     created_dt = created_dt.replace(tzinfo=timezone.utc)
-                date_str = created_dt.strftime('%m-%d %H:%M')
+                date_str = created_dt.strftime('%Y-%m-%d %H:%M')
             except (ValueError, TypeError): 
-                date_str = "???"
-            msg += f"  • {date_str}: {amount}€ ({currency}) - {deposit_type}\n"
-        
-        if len(pending_deposits) > 3:
-            msg += f"  ... and {len(pending_deposits) - 3} more\n"
+                date_str = "Unknown date"
+            
+            msg += f"{i}. {deposit_type} - {amount}€\n"
+            msg += f"   💰 Expected: {expected_crypto} {currency}\n"
+            msg += f"   📅 Created: {date_str}\n"
+            msg += f"   🆔 Payment: {payment_id}\n\n"
     
-    # Add recent purchases
-    if recent_purchases:
-        msg += f"\n📜 Recent Purchases ({len(recent_purchases)}):\n"
-        for purchase in recent_purchases[:5]:  # Show only first 5
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Back to User", callback_data=f"adm_user_overview|{user_id}")],
+        [InlineKeyboardButton("🔍 Search Another", callback_data="adm_search_user_start")]
+    ]
+    
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+
+async def handle_adm_user_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Shows paginated purchase history for a user."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID: 
+        return await query.answer("Access denied.", show_alert=True)
+    
+    if not params or len(params) < 2 or not params[0].isdigit() or not params[1].isdigit():
+        return await query.answer("Error: Invalid parameters.", show_alert=True)
+    
+    user_id = int(params[0])
+    offset = int(params[1])
+    limit = 10
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Get user info
+        c.execute("SELECT username FROM users WHERE user_id = ?", (user_id,))
+        user_result = c.fetchone()
+        if not user_result:
+            return await query.answer("User not found.", show_alert=True)
+        
+        username = user_result['username'] or f"ID_{user_id}"
+        
+        # Get total count
+        c.execute("SELECT COUNT(*) as count FROM purchases WHERE user_id = ?", (user_id,))
+        total_count = c.fetchone()['count']
+        
+        # Get purchases for this page
+        c.execute("""
+            SELECT purchase_date, product_name, product_type, product_size, price_paid, city, district
+            FROM purchases 
+            WHERE user_id = ? 
+            ORDER BY purchase_date DESC 
+            LIMIT ? OFFSET ?
+        """, (user_id, limit, offset))
+        purchases = c.fetchall()
+        
+    except sqlite3.Error as e:
+        logger.error(f"DB error fetching purchases for user {user_id}: {e}", exc_info=True)
+        await query.answer("Database error.", show_alert=True)
+        return
+    finally:
+        if conn: 
+            conn.close()
+    
+    current_page = (offset // limit) + 1
+    total_pages = math.ceil(total_count / limit) if total_count > 0 else 1
+    
+    msg = f"📜 Purchase History - @{username}\n"
+    msg += f"Page {current_page}/{total_pages} ({total_count} total)\n\n"
+    
+    if not purchases:
+        msg += "No purchases found."
+    else:
+        for i, purchase in enumerate(purchases, offset + 1):
             try:
                 dt_obj = datetime.fromisoformat(purchase['purchase_date'].replace('Z', '+00:00'))
                 if dt_obj.tzinfo is None: 
                     dt_obj = dt_obj.replace(tzinfo=timezone.utc)
-                date_str = dt_obj.strftime('%m-%d %H:%M')
+                date_str = dt_obj.strftime('%Y-%m-%d %H:%M')
             except (ValueError, TypeError): 
-                date_str = "???"
+                date_str = "Unknown date"
             
             p_type = purchase['product_type']
             p_emoji = PRODUCT_TYPES.get(p_type, DEFAULT_PRODUCT_EMOJI)
@@ -4499,50 +4616,215 @@ async def display_user_search_results(bot, chat_id: int, user_info: dict):
             p_city = purchase['city'] or 'N/A'
             p_district = purchase['district'] or 'N/A'
             
-            msg += f"  • {date_str}: {p_emoji} {p_size} - {p_price}€\n"
-            msg += f"    📍 {p_city}/{p_district}\n"
-        
-        if len(recent_purchases) > 5:
-            msg += f"  ... and {len(recent_purchases) - 5} more\n"
-    else:
-        msg += f"\n📜 Recent Purchases: None\n"
+            msg += f"{i}. {p_emoji} {p_type} {p_size} - {p_price}€\n"
+            msg += f"   📍 {p_city}/{p_district}\n"
+            msg += f"   📅 {date_str}\n\n"
     
-    # Add admin actions if any
-    if admin_actions:
-        msg += f"\n🔧 Recent Admin Actions ({len(admin_actions)}):\n"
-        for action in admin_actions[:3]:  # Show only first 3
+    # Pagination buttons
+    keyboard = []
+    nav_buttons = []
+    
+    if current_page > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"adm_user_purchases|{user_id}|{max(0, offset - limit)}"))
+    if current_page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"adm_user_purchases|{user_id}|{offset + limit}"))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    keyboard.append([InlineKeyboardButton("⬅️ Back to User", callback_data=f"adm_user_overview|{user_id}")])
+    keyboard.append([InlineKeyboardButton("🔍 Search Another", callback_data="adm_search_user_start")])
+    
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+
+async def handle_adm_user_actions(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Shows paginated admin actions for a user."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID: 
+        return await query.answer("Access denied.", show_alert=True)
+    
+    if not params or len(params) < 2 or not params[0].isdigit() or not params[1].isdigit():
+        return await query.answer("Error: Invalid parameters.", show_alert=True)
+    
+    user_id = int(params[0])
+    offset = int(params[1])
+    limit = 10
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Get user info
+        c.execute("SELECT username FROM users WHERE user_id = ?", (user_id,))
+        user_result = c.fetchone()
+        if not user_result:
+            return await query.answer("User not found.", show_alert=True)
+        
+        username = user_result['username'] or f"ID_{user_id}"
+        
+        # Get total count
+        c.execute("SELECT COUNT(*) as count FROM admin_log WHERE target_user_id = ?", (user_id,))
+        total_count = c.fetchone()['count']
+        
+        # Get actions for this page
+        c.execute("""
+            SELECT timestamp, action, reason, amount_change, old_value, new_value
+            FROM admin_log 
+            WHERE target_user_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT ? OFFSET ?
+        """, (user_id, limit, offset))
+        actions = c.fetchall()
+        
+    except sqlite3.Error as e:
+        logger.error(f"DB error fetching admin actions for user {user_id}: {e}", exc_info=True)
+        await query.answer("Database error.", show_alert=True)
+        return
+    finally:
+        if conn: 
+            conn.close()
+    
+    current_page = (offset // limit) + 1
+    total_pages = math.ceil(total_count / limit) if total_count > 0 else 1
+    
+    msg = f"🔧 Admin Actions - @{username}\n"
+    msg += f"Page {current_page}/{total_pages} ({total_count} total)\n\n"
+    
+    if not actions:
+        msg += "No admin actions found."
+    else:
+        for i, action in enumerate(actions, offset + 1):
             try:
                 action_dt = datetime.fromisoformat(action['timestamp'].replace('Z', '+00:00'))
                 if action_dt.tzinfo is None: 
                     action_dt = action_dt.replace(tzinfo=timezone.utc)
-                date_str = action_dt.strftime('%m-%d %H:%M')
+                date_str = action_dt.strftime('%Y-%m-%d %H:%M')
             except (ValueError, TypeError): 
-                date_str = "???"
+                date_str = "Unknown date"
             
             action_name = action['action']
             reason = action['reason'] or 'No reason'
             amount_change = action['amount_change']
             
-            msg += f"  • {date_str}: {action_name}\n"
+            msg += f"{i}. {action_name}\n"
+            msg += f"   📅 {date_str}\n"
             if amount_change:
-                msg += f"    💰 Amount: {format_currency(amount_change)}€\n"
-            msg += f"    📝 Reason: {reason}\n"
+                msg += f"   💰 Amount: {format_currency(amount_change)}€\n"
+            msg += f"   📝 Reason: {reason}\n\n"
+    
+    # Pagination buttons
+    keyboard = []
+    nav_buttons = []
+    
+    if current_page > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"adm_user_actions|{user_id}|{max(0, offset - limit)}"))
+    if current_page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"adm_user_actions|{user_id}|{offset + limit}"))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    keyboard.append([InlineKeyboardButton("⬅️ Back to User", callback_data=f"adm_user_overview|{user_id}")])
+    keyboard.append([InlineKeyboardButton("🔍 Search Another", callback_data="adm_search_user_start")])
+    
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+
+async def handle_adm_user_discounts(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Shows reseller discounts for a user."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID: 
+        return await query.answer("Access denied.", show_alert=True)
+    
+    if not params or not params[0].isdigit():
+        return await query.answer("Error: Invalid user ID.", show_alert=True)
+    
+    user_id = int(params[0])
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
         
-        if len(admin_actions) > 3:
-            msg += f"  ... and {len(admin_actions) - 3} more\n"
+        # Get user info
+        c.execute("SELECT username, is_reseller FROM users WHERE user_id = ?", (user_id,))
+        user_result = c.fetchone()
+        if not user_result:
+            return await query.answer("User not found.", show_alert=True)
+        
+        username = user_result['username'] or f"ID_{user_id}"
+        is_reseller = user_result['is_reseller'] == 1
+        
+        if not is_reseller:
+            return await query.answer("User is not a reseller.", show_alert=True)
+        
+        # Get reseller discounts
+        c.execute("""
+            SELECT product_type, discount_percentage 
+            FROM reseller_discounts 
+            WHERE reseller_user_id = ? 
+            ORDER BY product_type
+        """, (user_id,))
+        discounts = c.fetchall()
+        
+    except sqlite3.Error as e:
+        logger.error(f"DB error fetching discounts for user {user_id}: {e}", exc_info=True)
+        await query.answer("Database error.", show_alert=True)
+        return
+    finally:
+        if conn: 
+            conn.close()
     
-    # Split message if too long
-    if len(msg) > 4000:
-        msg = msg[:4000] + "\n\n✂️ ... Message truncated due to length."
+    msg = f"🏷️ Reseller Discounts - @{username}\n\n"
     
-    # Create action buttons
+    if not discounts:
+        msg += "No reseller discounts configured."
+    else:
+        for discount in discounts:
+            product_type = discount['product_type']
+            percentage = discount['discount_percentage']
+            emoji = PRODUCT_TYPES.get(product_type, DEFAULT_PRODUCT_EMOJI)
+            msg += f"{emoji} {product_type}: {percentage}%\n"
+    
     keyboard = [
-        [InlineKeyboardButton("💰 Adjust Balance", callback_data=f"adm_adjust_balance_start|{user_id}|0")],
-        [InlineKeyboardButton("🚫 Ban/Unban User", callback_data=f"adm_toggle_ban|{user_id}|0")],
-        [InlineKeyboardButton("👤 View Full Profile", callback_data=f"adm_view_user|{user_id}|0")],
-        [InlineKeyboardButton("🔍 Search Another User", callback_data="adm_search_user_start")],
-        [InlineKeyboardButton("👥 Browse All Users", callback_data="adm_manage_users|0")],
-        [InlineKeyboardButton("⬅️ Admin Menu", callback_data="admin_menu")]
+        [InlineKeyboardButton("⬅️ Back to User", callback_data=f"adm_user_overview|{user_id}")],
+        [InlineKeyboardButton("🔍 Search Another", callback_data="adm_search_user_start")]
     ]
     
-    await send_message_with_retry(bot, chat_id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+
+async def handle_adm_user_overview(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Returns to user overview from detailed sections."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID: 
+        return await query.answer("Access denied.", show_alert=True)
+    
+    if not params or not params[0].isdigit():
+        return await query.answer("Error: Invalid user ID.", show_alert=True)
+    
+    user_id = int(params[0])
+    
+    # Get user info and redisplay overview
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT user_id, username, balance, total_purchases, is_banned, is_reseller FROM users WHERE user_id = ?", (user_id,))
+        user_info = c.fetchone()
+        
+        if not user_info:
+            return await query.answer("User not found.", show_alert=True)
+        
+    except sqlite3.Error as e:
+        logger.error(f"DB error fetching user info for overview {user_id}: {e}", exc_info=True)
+        await query.answer("Database error.", show_alert=True)
+        return
+    finally:
+        if conn: 
+            conn.close()
+    
+    # Redisplay the overview
+    await display_user_search_results(query.message.bot, query.message.chat_id, dict(user_info))

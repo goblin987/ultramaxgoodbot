@@ -97,6 +97,9 @@ from admin import (
     handle_adm_new_type_description_message, handle_adm_edit_type_emoji_message,
     # User search handlers
     handle_adm_search_user_start, handle_adm_search_username_message,
+    # User detail handlers
+    handle_adm_user_deposits, handle_adm_user_purchases, handle_adm_user_actions,
+    handle_adm_user_discounts, handle_adm_user_overview,
 )
 from viewer_admin import (
     handle_viewer_admin_menu,
@@ -284,6 +287,11 @@ def callback_query_router(func):
                 
                 # User Search Handlers (from admin.py)
                 "adm_search_user_start": admin.handle_adm_search_user_start,
+                "adm_user_deposits": admin.handle_adm_user_deposits,
+                "adm_user_purchases": admin.handle_adm_user_purchases,
+                "adm_user_actions": admin.handle_adm_user_actions,
+                "adm_user_discounts": admin.handle_adm_user_discounts,
+                "adm_user_overview": admin.handle_adm_user_overview,
             }
 
             target_func = KNOWN_HANDLERS.get(command)
