@@ -4827,4 +4827,4 @@ async def handle_adm_user_overview(update: Update, context: ContextTypes.DEFAULT
             conn.close()
     
     # Redisplay the overview
-    await display_user_search_results(query.message.bot, query.message.chat_id, dict(user_info))
+    await display_user_search_results(context.bot, query.message.chat_id, dict(user_info))
