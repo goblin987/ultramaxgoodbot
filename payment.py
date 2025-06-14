@@ -689,8 +689,13 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
                 c_media = conn_media.cursor()
                 media_placeholders = ','.join('?' * len(processed_product_ids))
                 c_media.execute(f"SELECT product_id, media_type, telegram_file_id, file_path FROM product_media WHERE product_id IN ({media_placeholders})", processed_product_ids)
-                for row in c_media.fetchall(): media_details[row['product_id']].append(dict(row))
-            except sqlite3.Error as e: logger.error(f"DB error fetching media post-purchase: {e}")
+                media_rows = c_media.fetchall()
+                logger.info(f"Fetched {len(media_rows)} media records for products {processed_product_ids} for user {user_id}")
+                for row in media_rows: 
+                    media_details[row['product_id']].append(dict(row))
+                    logger.debug(f"Media for P{row['product_id']}: {row['media_type']} - FileID: {'Yes' if row['telegram_file_id'] else 'No'}, Path: {row['file_path']}")
+            except sqlite3.Error as e: 
+                logger.error(f"DB error fetching media post-purchase: {e}")
             finally:
                 if conn_media: conn_media.close()
 
@@ -719,11 +724,14 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
                 animations_to_send_details = []
                 opened_files = []
 
+                logger.info(f"Processing media for P{prod_id} user {user_id}: Found {len(media_items_for_product)} media items")
+
                 # --- Separate Media ---
                 for media_item in media_items_for_product:
                     media_type = media_item.get('media_type')
                     file_id = media_item.get('telegram_file_id')
                     file_path = media_item.get('file_path')
+                    logger.debug(f"Processing media item P{prod_id}: Type={media_type}, FileID={'Yes' if file_id else 'No'}, Path={file_path}")
                     if media_type in ['photo', 'video']:
                         photo_video_group_details.append({'type': media_type, 'id': file_id, 'path': file_path})
                     elif media_type == 'gif':
@@ -731,30 +739,43 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
                     else:
                         logger.warning(f"Unsupported media type '{media_type}' found for P{prod_id}")
 
+                logger.info(f"Media separation P{prod_id}: {len(photo_video_group_details)} photos/videos, {len(animations_to_send_details)} animations")
+
                 # --- Send Photos/Videos Group (No Caption) ---
                 if photo_video_group_details:
                     media_group_input = []
                     files_for_this_group = []
+                    logger.info(f"Attempting to send {len(photo_video_group_details)} photos/videos for P{prod_id} user {user_id}")
                     try:
                         for item in photo_video_group_details:
                             input_media = None; file_handle = None
                             if item['id']:
+                                logger.debug(f"Using Telegram file_id for P{prod_id}: {item['type']}")
                                 if item['type'] == 'photo': input_media = InputMediaPhoto(media=item['id'])
                                 elif item['type'] == 'video': input_media = InputMediaVideo(media=item['id'])
                             elif item['path'] and await asyncio.to_thread(os.path.exists, item['path']):
+                                logger.debug(f"Using file path for P{prod_id}: {item['path']}")
                                 file_handle = await asyncio.to_thread(open, item['path'], 'rb')
                                 opened_files.append(file_handle)
                                 files_for_this_group.append(file_handle)
                                 if item['type'] == 'photo': input_media = InputMediaPhoto(media=file_handle)
                                 elif item['type'] == 'video': input_media = InputMediaVideo(media=file_handle)
-                            if input_media: media_group_input.append(input_media)
-                            else: logger.warning(f"Could not prepare photo/video InputMedia P{prod_id}: {item}")
+                            else:
+                                logger.warning(f"No valid media source for P{prod_id}: FileID={bool(item['id'])}, Path exists={await asyncio.to_thread(os.path.exists, item['path']) if item['path'] else False}")
+                            if input_media: 
+                                media_group_input.append(input_media)
+                                logger.debug(f"Added media to group for P{prod_id}: {item['type']}")
+                            else: 
+                                logger.warning(f"Could not prepare photo/video InputMedia P{prod_id}: {item}")
 
                         if media_group_input:
+                            logger.info(f"Sending media group with {len(media_group_input)} items for P{prod_id} user {user_id}")
                             await context.bot.send_media_group(chat_id, media=media_group_input, connect_timeout=20, read_timeout=20)
-                            logger.info(f"Sent photo/video group ({len(media_group_input)}) for P{prod_id} user {user_id}.")
+                            logger.info(f"✅ Successfully sent photo/video group ({len(media_group_input)}) for P{prod_id} user {user_id}")
+                        else:
+                            logger.warning(f"No media items prepared for sending P{prod_id} user {user_id}")
                     except Exception as group_e:
-                        logger.error(f"Error sending photo/video group P{prod_id}: {group_e}")
+                        logger.error(f"❌ Error sending photo/video group P{prod_id} user {user_id}: {group_e}", exc_info=True)
                     finally:
                         for f in files_for_this_group:
                              try:
@@ -762,33 +783,38 @@ async def _finalize_purchase(user_id: int, basket_snapshot: list, discount_code_
                              except Exception: pass
 
                 # --- Send Animations (GIFs) Separately (No Caption) ---
-                for item in animations_to_send_details:
-                    anim_file_handle = None
-                    try:
-                        media_to_send_ref = None
-                        if item['id']:
-                            media_to_send_ref = item['id']
-                        elif item['path'] and await asyncio.to_thread(os.path.exists, item['path']):
-                            anim_file_handle = await asyncio.to_thread(open, item['path'], 'rb')
-                            opened_files.append(anim_file_handle)
-                            media_to_send_ref = anim_file_handle
-                        else:
-                            logger.warning(f"Could not find GIF source for P{prod_id}: ID={item['id']}, Path={item['path']}")
-                            continue
+                if animations_to_send_details:
+                    logger.info(f"Attempting to send {len(animations_to_send_details)} animations for P{prod_id} user {user_id}")
+                    for item in animations_to_send_details:
+                        anim_file_handle = None
+                        try:
+                            media_to_send_ref = None
+                            if item['id']:
+                                logger.debug(f"Using Telegram file_id for animation P{prod_id}")
+                                media_to_send_ref = item['id']
+                            elif item['path'] and await asyncio.to_thread(os.path.exists, item['path']):
+                                logger.debug(f"Using file path for animation P{prod_id}: {item['path']}")
+                                anim_file_handle = await asyncio.to_thread(open, item['path'], 'rb')
+                                opened_files.append(anim_file_handle)
+                                media_to_send_ref = anim_file_handle
+                            else:
+                                logger.warning(f"Could not find GIF source for P{prod_id}: ID={bool(item['id'])}, Path exists={await asyncio.to_thread(os.path.exists, item['path']) if item['path'] else False}")
+                                continue
 
-                        await context.bot.send_animation(chat_id=chat_id, animation=media_to_send_ref) # NO CAPTION
-                        logger.info(f"Sent animation for P{prod_id} user {user_id}.")
-                    except Exception as anim_e:
-                        logger.error(f"Error sending animation P{prod_id}: {anim_e}")
-                    finally:
-                        if anim_file_handle and anim_file_handle in opened_files:
-                            try: await asyncio.to_thread(anim_file_handle.close); opened_files.remove(anim_file_handle)
-                            except Exception: pass
+                            await context.bot.send_animation(chat_id=chat_id, animation=media_to_send_ref) # NO CAPTION
+                            logger.info(f"✅ Successfully sent animation for P{prod_id} user {user_id}")
+                        except Exception as anim_e:
+                            logger.error(f"❌ Error sending animation P{prod_id} user {user_id}: {anim_e}", exc_info=True)
+                        finally:
+                            if anim_file_handle and anim_file_handle in opened_files:
+                                try: await asyncio.to_thread(anim_file_handle.close); opened_files.remove(anim_file_handle)
+                                except Exception: pass
 
                 # --- Always Send Combined Text Separately ---
                 if combined_caption:
+                    logger.debug(f"Sending text details for P{prod_id} user {user_id}: {len(combined_caption)} characters")
                     await send_message_with_retry(context.bot, chat_id, combined_caption, parse_mode=None)
-                    logger.info(f"Sent separate text details for P{prod_id} user {user_id}.")
+                    logger.info(f"✅ Successfully sent text details for P{prod_id} user {user_id}")
                 else:
                      # Create a fallback message if both original text and header are missing somehow
                     fallback_text = f"(No details provided for Product ID {prod_id})"
