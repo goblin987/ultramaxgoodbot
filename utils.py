@@ -1963,7 +1963,7 @@ def clean_expired_pending_payments():
         
         # Find expired pending purchases (not refills) older than cutoff time
         c.execute("""
-            SELECT payment_id, user_id, basket_snapshot, created_at
+            SELECT payment_id, user_id, basket_snapshot_json, created_at
             FROM pending_deposits 
             WHERE is_purchase = 1 
             AND created_at < ? 
@@ -1981,10 +1981,19 @@ def clean_expired_pending_payments():
         for record in expired_records:
             payment_id = record['payment_id']
             user_id = record['user_id']
-            basket_snapshot = record['basket_snapshot']
+            basket_snapshot_json = record['basket_snapshot_json']
             created_at = record['created_at']
             
             logger.info(f"Processing expired payment {payment_id} for user {user_id} (created: {created_at})")
+            
+            # Deserialize basket snapshot if present
+            basket_snapshot = None
+            if basket_snapshot_json:
+                try:
+                    basket_snapshot = json.loads(basket_snapshot_json)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to decode basket_snapshot_json for expired payment {payment_id}: {e}")
+                    basket_snapshot = None
             
             # Collect info for later processing
             expired_purchases.append({

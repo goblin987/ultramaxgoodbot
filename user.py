@@ -684,15 +684,28 @@ async def handle_add_to_basket(update: Update, context: ContextTypes.DEFAULT_TYP
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("BEGIN EXCLUSIVE")
-        # Query using original price
+        
+        # Step 1: Find an available product
         c.execute("SELECT id FROM products WHERE city = ? AND district = ? AND product_type = ? AND size = ? AND price = ? AND available > reserved ORDER BY id LIMIT 1", (city, district, p_type, size, float(original_price)))
         product_row = c.fetchone()
 
         if not product_row:
-            conn.rollback(); keyboard = [[InlineKeyboardButton(f"{EMOJI_BACK} {back_options_button}", callback_data=f"type|{city_id}|{dist_id}|{p_type}"), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]]; await query.edit_message_text(f"❌ {out_of_stock_msg}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None); return
+            conn.rollback()
+            keyboard = [[InlineKeyboardButton(f"{EMOJI_BACK} {back_options_button}", callback_data=f"type|{city_id}|{dist_id}|{p_type}"), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]]
+            await query.edit_message_text(f"❌ {out_of_stock_msg}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+            return
 
         product_id_reserved = product_row['id']
-        c.execute("UPDATE products SET reserved = reserved + 1 WHERE id = ?", (product_id_reserved,))
+        
+        # Step 2: Atomically reserve the specific product with availability check
+        update_result = c.execute("UPDATE products SET reserved = reserved + 1 WHERE id = ? AND available > reserved", (product_id_reserved,))
+        
+        if update_result.rowcount == 0:
+            # Race condition: product was taken between SELECT and UPDATE
+            conn.rollback()
+            keyboard = [[InlineKeyboardButton(f"{EMOJI_BACK} {back_options_button}", callback_data=f"type|{city_id}|{dist_id}|{p_type}"), InlineKeyboardButton(f"{EMOJI_HOME} {home_button}", callback_data="back_start")]]
+            await query.edit_message_text("❌ Sorry, this item was just taken by another user! Please try again.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+            return
         c.execute("SELECT basket FROM users WHERE user_id = ?", (user_id,))
         user_basket_row = c.fetchone(); current_basket_str = user_basket_row['basket'] if user_basket_row else ''
         timestamp = time.time(); new_item_str = f"{product_id_reserved}:{timestamp}"
