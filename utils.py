@@ -1588,13 +1588,42 @@ def get_nowpayments_min_amount(currency_code: str) -> Decimal | None:
 def format_expiration_time(expiration_date_str: str | None) -> str:
     if not expiration_date_str: return "N/A"
     try:
+        # Import pytz for timezone conversion
+        import pytz
+        
         # Ensure the string ends with timezone info for fromisoformat
         if not expiration_date_str.endswith('Z') and '+' not in expiration_date_str and '-' not in expiration_date_str[10:]:
             expiration_date_str += 'Z' # Assume UTC if no timezone
         dt_obj = datetime.fromisoformat(expiration_date_str.replace('Z', '+00:00'))
-        # Format with timezone name (like UTC)
-        return dt_obj.strftime("%H:%M:%S %Z") if dt_obj.tzinfo else dt_obj.strftime("%H:%M:%S")
-    except (ValueError, TypeError) as e: logger.warning(f"Could not parse expiration date string '{expiration_date_str}': {e}"); return "Invalid Date"
+        
+        # Convert to Lithuanian timezone (Europe/Vilnius)
+        lithuanian_tz = pytz.timezone('Europe/Vilnius')
+        if dt_obj.tzinfo:
+            # Convert UTC to Lithuanian time
+            lithuanian_time = dt_obj.astimezone(lithuanian_tz)
+            return lithuanian_time.strftime("%H:%M:%S LT")  # LT = Local Time (Lithuanian)
+        else:
+            # If no timezone info, assume UTC and convert
+            utc_time = dt_obj.replace(tzinfo=pytz.UTC)
+            lithuanian_time = utc_time.astimezone(lithuanian_tz)
+            return lithuanian_time.strftime("%H:%M:%S LT")
+    except ImportError:
+        # Fallback if pytz is not available - use manual offset
+        try:
+            if not expiration_date_str.endswith('Z') and '+' not in expiration_date_str and '-' not in expiration_date_str[10:]:
+                expiration_date_str += 'Z'
+            dt_obj = datetime.fromisoformat(expiration_date_str.replace('Z', '+00:00'))
+            # Lithuania is UTC+2 (UTC+3 during DST)
+            # For simplicity, add 2 hours (this is a fallback)
+            from datetime import timedelta
+            lithuanian_time = dt_obj + timedelta(hours=2)
+            return lithuanian_time.strftime("%H:%M:%S LT")
+        except Exception as fallback_e:
+            logger.warning(f"Fallback timezone conversion failed for '{expiration_date_str}': {fallback_e}")
+            return "Invalid Date"
+    except (ValueError, TypeError) as e: 
+        logger.warning(f"Could not parse expiration date string '{expiration_date_str}': {e}"); 
+        return "Invalid Date"
 
 
 # --- Placeholder Handler ---
