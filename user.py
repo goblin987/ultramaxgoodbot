@@ -698,6 +698,7 @@ async def handle_add_to_basket(update: Update, context: ContextTypes.DEFAULT_TYP
         product_id_reserved = product_row['id']
         
         # Step 2: Atomically reserve the specific product with availability check
+        # This prevents race conditions by ensuring reserved never exceeds available
         update_result = c.execute("UPDATE products SET reserved = reserved + 1 WHERE id = ? AND available > reserved", (product_id_reserved,))
         
         if update_result.rowcount == 0:
@@ -871,22 +872,54 @@ def validate_discount_code(code_text: str, base_total_float: float) -> tuple[boo
     code_applied_msg_template = lang_data.get("code_applied_message", "Code '{code}' ({value}) applied. Discount: -{amount} EUR")
 
     if not code_text: return False, no_code_msg, None
+    
+    # Normalize the code: strip whitespace and convert to uppercase for case-insensitive lookup
+    normalized_code = code_text.strip().upper()
+    
     conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT * FROM discount_codes WHERE code = ?", (code_text,))
+        # Use case-insensitive search by converting both to uppercase
+        c.execute("SELECT * FROM discount_codes WHERE UPPER(code) = ?", (normalized_code,))
         code_data = c.fetchone()
 
         if not code_data: return False, not_found_msg, None
         if not code_data['is_active']: return False, inactive_msg, None
+        # Enhanced expiry date validation
         if code_data['expiry_date']:
             try:
-                # Ensure stored date is treated as UTC before comparison
-                expiry_dt = datetime.fromisoformat(code_data['expiry_date']).replace(tzinfo=timezone.utc)
-                if datetime.now(timezone.utc) > expiry_dt: return False, expired_msg, None
-            except ValueError: logger.warning(f"Invalid expiry_date format DB code {code_data['code']}"); return False, invalid_expiry_msg, None
-        if code_data['max_uses'] is not None and code_data['uses_count'] >= code_data['max_uses']: return False, limit_reached_msg, None
+                expiry_date_str = code_data['expiry_date']
+                # Handle different date formats and ensure UTC
+                if 'T' in expiry_date_str:
+                    # ISO format
+                    if expiry_date_str.endswith('Z'):
+                        expiry_dt = datetime.fromisoformat(expiry_date_str.replace('Z', '+00:00'))
+                    elif '+' in expiry_date_str or expiry_date_str.count('-') > 2:
+                        expiry_dt = datetime.fromisoformat(expiry_date_str)
+                    else:
+                        # No timezone info, assume UTC
+                        expiry_dt = datetime.fromisoformat(expiry_date_str).replace(tzinfo=timezone.utc)
+                else:
+                    # Date only format, set to end of day UTC
+                    date_only = datetime.strptime(expiry_date_str, '%Y-%m-%d')
+                    expiry_dt = date_only.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+                
+                if datetime.now(timezone.utc) > expiry_dt: 
+                    logger.info(f"Discount code '{code_data['code']}' expired on {expiry_dt}")
+                    return False, expired_msg, None
+            except (ValueError, TypeError) as e: 
+                logger.warning(f"Invalid expiry_date format DB code {code_data['code']}: {e}")
+                return False, invalid_expiry_msg, None
+        if code_data['max_uses'] is not None and code_data['uses_count'] >= code_data['max_uses']: 
+            logger.info(f"Discount code '{code_data['code']}' reached usage limit: {code_data['uses_count']}/{code_data['max_uses']}")
+            return False, limit_reached_msg, None
+
+        # Check minimum order amount if specified (add this column to DB if needed)
+        min_order_amount = code_data.get('min_order_amount')
+        if min_order_amount is not None and base_total_float < float(min_order_amount):
+            logger.info(f"Discount code '{code_data['code']}' minimum order not met: {base_total_float} < {min_order_amount}")
+            return False, lang_data.get("discount_min_order_not_met", "Minimum order amount not met for this discount code."), None
 
         discount_amount = Decimal('0.0')
         dtype = code_data['discount_type']; value = Decimal(str(code_data['value']))
