@@ -174,6 +174,7 @@ LANGUAGES = {
         "choose_crypto_for_purchase": "Choose crypto to pay {amount} EUR for your basket:", # <<< ADDED
         "crypto_purchase_success": "Payment Confirmed! Your purchase details are being sent.", # <<< ADDED
         "crypto_purchase_failed": "Payment Failed/Expired. Your items are no longer reserved.", # <<< ADDED
+        "payment_timeout_notification": "⏰ Payment Timeout: Your payment for basket items has expired after 30 minutes. Reserved items have been released.", # <<< NEW
         "basket_pay_too_low": "Basket total {basket_total} EUR is below minimum for {currency}.", # <<< ADDED
         "balance_changed_error": "❌ Transaction failed: Your balance changed. Please check your balance and try again.",
         "order_failed_all_sold_out_balance": "❌ Order Failed: All items in your basket became unavailable during processing. Your balance was not charged.",
@@ -510,6 +511,7 @@ LANGUAGES = {
         "choose_crypto_for_purchase": "Pasirinkite kriptovaliutą mokėti {amount} EUR už jūsų krepšelį:",
         "crypto_purchase_success": "Mokėjimas patvirtintas! Jūsų pirkimo detalės siunčiamos.",
         "crypto_purchase_failed": "Mokėjimas nepavyko/baigėsi. Jūsų prekės nebėra rezervuotos.",
+        "payment_timeout_notification": "⏰ Mokėjimo Laikas Baigėsi: Jūsų mokėjimas už krepšelio prekes pasibaigė po 30 minučių. Rezervuotos prekės buvo atlaisvintos.", # <<< NEW
         "basket_pay_too_low": "Krepšelio suma {basket_total} EUR yra mažesnė nei minimali {currency}.",
         "balance_changed_error": "❌ Transakcija nepavyko: Jūsų balansas pasikeitė. Patikrinkite balansą ir bandykite dar kartą.",
         "order_failed_all_sold_out_balance": "❌ Užsakymas nepavyko: Visos prekės krepšelyje tapo neprieinamos apdorojimo metu. Jūsų balansas nebuvo apmokestintas.",
@@ -731,6 +733,7 @@ LANGUAGES = {
         "choose_crypto_for_purchase": "Выберите криптовалюту для оплаты {amount} EUR за вашу корзину:",
         "crypto_purchase_success": "Оплата подтверждена! Детали вашей покупки отправляются.",
         "crypto_purchase_failed": "Оплата не удалась/истекла. Ваши товары больше не зарезервированы.",
+        "payment_timeout_notification": "⏰ Время Оплаты Истекло: Ваш платеж за товары в корзине истек через 30 минут. Зарезервированные товары освобождены.", # <<< NEW
         "basket_pay_too_low": "Сумма корзины {basket_total} EUR ниже минимальной для {currency}.",
         "balance_changed_error": "❌ Транзакция не удалась: Ваш баланс изменился. Пожалуйста, проверьте баланс и попробуйте снова.",
         "order_failed_all_sold_out_balance": "❌ Заказ не удался: Все товары в вашей корзине стали недоступны во время обработки. Средства с вашего баланса не списаны.",
@@ -1891,3 +1894,129 @@ def set_active_welcome_message(name: str) -> bool:
     except sqlite3.Error as e:
         logger.error(f"DB error setting active welcome message to '{name}': {e}", exc_info=True)
         return False
+
+# --- PAYMENT RESERVATION TIMEOUT (30 minutes) ---
+PAYMENT_TIMEOUT_MINUTES = 30
+PAYMENT_TIMEOUT_SECONDS = PAYMENT_TIMEOUT_MINUTES * 60
+
+# --- NEW: Clean up expired pending payments and unreserve items ---
+def get_expired_payments_for_notification():
+    """
+    Gets information about expired pending payments for user notifications.
+    Returns a list of user info for notifications before the records are cleaned up.
+    """
+    current_time = time.time()
+    cutoff_timestamp = current_time - PAYMENT_TIMEOUT_SECONDS
+    cutoff_datetime = datetime.fromtimestamp(cutoff_timestamp, tz=timezone.utc)
+    
+    user_notifications = []
+    conn = None
+    
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Find expired pending purchases and get user language info
+        c.execute("""
+            SELECT pd.user_id, u.language
+            FROM pending_deposits pd
+            JOIN users u ON pd.user_id = u.user_id
+            WHERE pd.is_purchase = 1 
+            AND pd.created_at < ? 
+            ORDER BY pd.created_at
+        """, (cutoff_datetime.isoformat(),))
+        
+        expired_records = c.fetchall()
+        
+        for record in expired_records:
+            user_notifications.append({
+                'user_id': record['user_id'],
+                'language': record['language'] or 'en'
+            })
+            
+    except sqlite3.Error as e:
+        logger.error(f"DB error while getting expired payments for notification: {e}", exc_info=True)
+    finally:
+        if conn:
+            conn.close()
+    
+    return user_notifications
+
+
+def clean_expired_pending_payments():
+    """
+    Checks for pending payments that have expired (older than PAYMENT_TIMEOUT_SECONDS)
+    and automatically unreserves the items and removes the pending records.
+    """
+    logger.info("Running scheduled job: clean_expired_pending_payments")
+    
+    current_time = time.time()
+    cutoff_timestamp = current_time - PAYMENT_TIMEOUT_SECONDS
+    cutoff_datetime = datetime.fromtimestamp(cutoff_timestamp, tz=timezone.utc)
+    
+    expired_purchases = []
+    conn = None
+    
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Find expired pending purchases (not refills) older than cutoff time
+        c.execute("""
+            SELECT payment_id, user_id, basket_snapshot, created_at
+            FROM pending_deposits 
+            WHERE is_purchase = 1 
+            AND created_at < ? 
+            ORDER BY created_at
+        """, (cutoff_datetime.isoformat(),))
+        
+        expired_records = c.fetchall()
+        
+        if not expired_records:
+            logger.debug("No expired pending payments found.")
+            return
+            
+        logger.info(f"Found {len(expired_records)} expired pending payments to clean up.")
+        
+        for record in expired_records:
+            payment_id = record['payment_id']
+            user_id = record['user_id']
+            basket_snapshot = record['basket_snapshot']
+            created_at = record['created_at']
+            
+            logger.info(f"Processing expired payment {payment_id} for user {user_id} (created: {created_at})")
+            
+            # Collect info for later processing
+            expired_purchases.append({
+                'payment_id': payment_id,
+                'user_id': user_id,
+                'basket_snapshot': basket_snapshot
+            })
+            
+    except sqlite3.Error as e:
+        logger.error(f"DB error while checking expired pending payments: {e}", exc_info=True)
+        return
+    finally:
+        if conn:
+            conn.close()
+    
+    # Process each expired payment
+    processed_count = 0
+    for expired_payment in expired_purchases:
+        payment_id = expired_payment['payment_id']
+        user_id = expired_payment['user_id']
+        basket_snapshot = expired_payment['basket_snapshot']
+        
+        try:
+            # Remove the pending deposit record (this will trigger unreserving via remove_pending_deposit)
+            success = remove_pending_deposit(payment_id, trigger="timeout_expiry")
+            if success:
+                processed_count += 1
+                logger.info(f"Successfully cleaned up expired payment {payment_id} for user {user_id}")
+            else:
+                logger.warning(f"Failed to remove expired pending payment {payment_id} for user {user_id}")
+                
+        except Exception as e:
+            logger.error(f"Error processing expired payment {payment_id} for user {user_id}: {e}", exc_info=True)
+    
+    logger.info(f"Cleaned up {processed_count}/{len(expired_purchases)} expired pending payments.")

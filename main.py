@@ -38,7 +38,9 @@ from utils import (
     get_pending_deposit, remove_pending_deposit, FEE_ADJUSTMENT,
     send_message_with_retry,
     log_admin_action,
-    format_currency
+    format_currency,
+    clean_expired_pending_payments,
+    get_expired_payments_for_notification
 )
 import user # Import user module
 from user import (
@@ -467,6 +469,40 @@ async def clear_expired_baskets_job_wrapper(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in background job clear_expired_baskets_job: {e}", exc_info=True)
 
+async def clean_expired_payments_job_wrapper(context: ContextTypes.DEFAULT_TYPE):
+    logger.debug("Running background job: clean_expired_payments_job")
+    try:
+        # Get the list of expired payments before cleaning them up
+        expired_user_notifications = await asyncio.to_thread(get_expired_payments_for_notification)
+        
+        # Clean up the expired payments
+        await asyncio.to_thread(clean_expired_pending_payments)
+        
+        # Send notifications to users
+        if expired_user_notifications:
+            await send_timeout_notifications(context, expired_user_notifications)
+            
+    except Exception as e:
+        logger.error(f"Error in background job clean_expired_payments_job: {e}", exc_info=True)
+
+
+async def send_timeout_notifications(context: ContextTypes.DEFAULT_TYPE, user_notifications: list):
+    """Send timeout notifications to users whose payments have expired."""
+    for user_notification in user_notifications:
+        user_id = user_notification['user_id']
+        user_lang = user_notification['language']
+        
+        try:
+            lang_data = LANGUAGES.get(user_lang, LANGUAGES['en'])
+            notification_msg = lang_data.get("payment_timeout_notification", 
+                "⏰ Payment Timeout: Your payment for basket items has expired after 30 minutes. Reserved items have been released.")
+            
+            await send_message_with_retry(context.bot, user_id, notification_msg, parse_mode=None)
+            logger.info(f"Sent payment timeout notification to user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send timeout notification to user {user_id}: {e}")
+
 
 # --- Flask Webhook Routes ---
 def verify_nowpayments_signature(request_data_bytes, signature_header, secret_key):
@@ -732,10 +768,13 @@ def main() -> None:
     if BASKET_TIMEOUT > 0:
         job_queue = application.job_queue
         if job_queue:
-            logger.info(f"Setting up background job for expired baskets (interval: 60s)...")
+            logger.info(f"Setting up background jobs...")
+            # Basket cleanup job
             job_queue.run_repeating(clear_expired_baskets_job_wrapper, interval=timedelta(seconds=60), first=timedelta(seconds=10), name="clear_baskets")
-            logger.info("Background job setup complete.")
-        else: logger.warning("Job Queue is not available. Basket clearing job skipped.")
+            # Payment timeout cleanup job (runs every 5 minutes)
+            job_queue.run_repeating(clean_expired_payments_job_wrapper, interval=timedelta(minutes=5), first=timedelta(seconds=30), name="clean_payments")
+            logger.info("Background jobs setup complete (basket cleanup + payment timeout).")
+        else: logger.warning("Job Queue is not available. Background jobs skipped.")
     else: logger.warning("BASKET_TIMEOUT is not positive. Skipping background job setup.")
 
     async def setup_webhooks_and_run():
