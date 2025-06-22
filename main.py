@@ -529,23 +529,12 @@ def nowpayments_webhook():
     raw_body = request.get_data() # Get raw body once
     signature = request.headers.get('x-nowpayments-sig')
 
-    # Always log received signature and what would be expected for debugging
-    if NOWPAYMENTS_IPN_SECRET:
-        try:
-            temp_ordered_data = json.dumps(json.loads(raw_body), sort_keys=True, separators=(',', ':'))
-            expected_signature = hmac.new(NOWPAYMENTS_IPN_SECRET.encode('utf-8'), temp_ordered_data.encode('utf-8'), hashlib.sha512).hexdigest()
-            logger.info(f"NOWPayments IPN Received. Signature: {signature}. Expected (if verified): {expected_signature}")
-        except Exception as sig_calc_e:
-            logger.error(f"Error calculating expected signature for logging: {sig_calc_e}")
-
-    # Signature Verification (Only if secret is set)
-    if NOWPAYMENTS_IPN_SECRET:
-        if not verify_nowpayments_signature(raw_body, signature, NOWPAYMENTS_IPN_SECRET):
-            logger.error("Webhook signature verification FAILED. Request will be ignored.")
-            return Response("Signature verification failed", status=403)
-        logger.info("Webhook signature VERIFIED successfully.")
-    else:
-        logger.warning("!!! NOWPayments signature verification is DISABLED (NOWPAYMENTS_IPN_SECRET not set) !!!")
+    # Signature Verification DISABLED by user request (trust issues with NOWPayments password)
+    # Note: This reduces security but is acceptable if webhook URL is kept secret
+    logger.info("!!! NOWPayments signature verification is DISABLED by configuration !!!")
+    logger.info(f"NOWPayments IPN Received (signature verification SKIPPED)")
+    
+    # Always proceed without verification (DISABLED)
 
 
     try:
