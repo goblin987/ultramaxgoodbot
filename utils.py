@@ -1046,6 +1046,17 @@ def init_db():
             )''')
             # <<< END ADDED >>>
 
+            # <<< ADDED: workers table >>>
+            c.execute('''CREATE TABLE IF NOT EXISTS workers (
+                user_id INTEGER PRIMARY KEY NOT NULL,
+                username TEXT,
+                added_by INTEGER NOT NULL,
+                added_date TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (added_by) REFERENCES users(user_id) ON DELETE CASCADE
+            )''')
+            # <<< END ADDED >>>
+
             # Insert initial welcome messages (only if table was just created or empty - handled by INSERT OR IGNORE)
             initial_templates = [
                 ("default", LANGUAGES['en']['welcome'], "Built-in default message (EN)"),
@@ -1088,6 +1099,11 @@ def init_db():
             # <<< ADDED Indices for reseller >>>
             c.execute("CREATE INDEX IF NOT EXISTS idx_users_is_reseller ON users(is_reseller)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_reseller_discounts_user_id ON reseller_discounts(reseller_user_id)")
+            # <<< END ADDED >>>
+            
+            # <<< ADDED Indices for workers >>>
+            c.execute("CREATE INDEX IF NOT EXISTS idx_workers_user_id ON workers(user_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_workers_added_by ON workers(added_by)")
             # <<< END ADDED >>>
 
             conn.commit()
@@ -2061,3 +2077,69 @@ def clean_expired_pending_payments():
             logger.error(f"Error processing expired payment {payment_id} for user {user_id}: {e}", exc_info=True)
     
     logger.info(f"Cleaned up {processed_count}/{len(expired_purchases)} expired pending payments.")
+
+
+# --- Worker Management Functions ---
+def get_workers():
+    """Get all workers with their details."""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT w.user_id, w.username, w.added_by, w.added_date,
+                       admin.username as added_by_username
+                FROM workers w
+                LEFT JOIN users admin ON w.added_by = admin.user_id
+                ORDER BY w.added_date DESC
+            """)
+            return c.fetchall()
+    except sqlite3.Error as e:
+        logger.error(f"Database error fetching workers: {e}", exc_info=True)
+        return []
+
+def add_worker(user_id: int, username: str | None, added_by: int) -> bool:
+    """Add a new worker."""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO workers (user_id, username, added_by, added_date)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, username, added_by, datetime.now(timezone.utc).isoformat()))
+            conn.commit()
+            logger.info(f"Added worker {user_id} (@{username}) by admin {added_by}")
+            return True
+    except sqlite3.IntegrityError:
+        logger.warning(f"Worker {user_id} already exists")
+        return False
+    except sqlite3.Error as e:
+        logger.error(f"Database error adding worker {user_id}: {e}", exc_info=True)
+        return False
+
+def remove_worker(user_id: int) -> bool:
+    """Remove a worker."""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            result = c.execute("DELETE FROM workers WHERE user_id = ?", (user_id,))
+            conn.commit()
+            if result.rowcount > 0:
+                logger.info(f"Removed worker {user_id}")
+                return True
+            else:
+                logger.warning(f"Worker {user_id} not found for removal")
+                return False
+    except sqlite3.Error as e:
+        logger.error(f"Database error removing worker {user_id}: {e}", exc_info=True)
+        return False
+
+def is_worker(user_id: int) -> bool:
+    """Check if a user is a worker."""
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("SELECT 1 FROM workers WHERE user_id = ?", (user_id,))
+            return c.fetchone() is not None
+    except sqlite3.Error as e:
+        logger.error(f"Database error checking worker status for {user_id}: {e}", exc_info=True)
+        return False

@@ -40,9 +40,11 @@ from utils import (
     log_admin_action,
     format_currency,
     clean_expired_pending_payments,
-    get_expired_payments_for_notification
+    get_expired_payments_for_notification,
+    is_worker
 )
-import user # Import user module
+import user
+import worker # Import user module
 from user import (
     start, handle_shop, handle_city_selection, handle_district_selection,
     handle_type_selection, handle_product_selection, handle_add_to_basket,
@@ -104,6 +106,10 @@ from admin import (
     handle_adm_user_discounts, handle_adm_user_overview,
     # Discount code message handlers
     handle_adm_discount_code_message, handle_adm_discount_value_message,
+    # Worker management handlers
+    handle_adm_manage_workers, handle_adm_add_worker, handle_adm_remove_worker,
+    handle_adm_confirm_remove_worker, handle_adm_execute_remove_worker,
+    handle_adm_worker_username_message, handle_adm_worker_user_id_message,
 )
 from viewer_admin import (
     handle_viewer_admin_menu,
@@ -296,6 +302,30 @@ def callback_query_router(func):
                 "adm_user_actions": admin.handle_adm_user_actions,
                 "adm_user_discounts": admin.handle_adm_user_discounts,
                 "adm_user_overview": admin.handle_adm_user_overview,
+                
+                # Worker Management Handlers (from admin.py)
+                "adm_manage_workers": admin.handle_adm_manage_workers,
+                "adm_add_worker": admin.handle_adm_add_worker,
+                "adm_remove_worker": admin.handle_adm_remove_worker,
+                "adm_confirm_remove_worker": admin.handle_adm_confirm_remove_worker,
+                "adm_execute_remove_worker": admin.handle_adm_execute_remove_worker,
+                
+                # Worker Panel Handlers (from worker.py)
+                "worker_panel": worker.handle_worker_panel,
+                "worker_add_drop": worker.handle_worker_add_drop,
+                "worker_city": worker.handle_worker_city,
+                "worker_district": worker.handle_worker_district,
+                "worker_type": worker.handle_worker_type,
+                "worker_size": worker.handle_worker_size,
+                "worker_custom_size": worker.handle_worker_custom_size,
+                "worker_confirm_add_drop": worker.handle_worker_confirm_add_drop,
+                "worker_bulk_add": worker.handle_worker_bulk_add,
+                "worker_bulk_city": worker.handle_worker_bulk_city,
+                "worker_bulk_city_selected": worker.handle_worker_bulk_city_selected,
+                "worker_bulk_district": worker.handle_worker_bulk_district,
+                "worker_bulk_type": worker.handle_worker_bulk_type,
+                "worker_bulk_process": worker.handle_worker_bulk_process,
+                "close_menu": worker.handle_close_menu,
             }
 
             target_func = KNOWN_HANDLERS.get(command)
@@ -369,6 +399,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Discount Code Management States (from admin.py)
         'awaiting_discount_code': admin.handle_adm_discount_code_message,
         'awaiting_discount_value': admin.handle_adm_discount_value_message,
+        
+        # Worker Management States (from admin.py)
+        'awaiting_worker_username': admin.handle_adm_worker_username_message,
+        'awaiting_worker_user_id': admin.handle_adm_worker_user_id_message,
+        
+        # Worker Panel States (from worker.py)
+        'awaiting_worker_custom_size': worker.handle_worker_custom_size_message,
+        'awaiting_worker_drop_details': worker.handle_worker_drop_details_message,
+        'awaiting_worker_price': worker.handle_worker_price_message,
+        'awaiting_worker_bulk_messages': worker.handle_worker_bulk_messages,
     }
 
     handler_func = STATE_HANDLERS.get(state)
@@ -508,6 +548,40 @@ async def send_timeout_notifications(context: ContextTypes.DEFAULT_TYPE, user_no
             
         except Exception as e:
             logger.error(f"Failed to send timeout notification to user {user_id}: {e}")
+
+
+# --- Admin Command Handler (Routes to Admin or Worker Panel) ---
+async def handle_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin command - route to admin panel or worker panel based on user role."""
+    user = update.effective_user
+    if not user:
+        logger.warning("Admin command triggered without effective_user.")
+        return
+
+    user_id = user.id
+    
+    # Check if user is primary admin
+    if user_id == ADMIN_ID:
+        await admin.handle_admin_menu(update, context)
+        return
+    
+    # Check if user is secondary admin
+    if user_id in SECONDARY_ADMIN_IDS:
+        await admin.handle_admin_menu(update, context)
+        return
+    
+    # Check if user is worker
+    if is_worker(user_id):
+        await worker.handle_worker_panel(update, context)
+        return
+    
+    # User has no admin/worker permissions
+    await send_message_with_retry(
+        context.bot, 
+        update.effective_chat.id, 
+        "❌ Access denied. You do not have administrative or worker permissions.", 
+        parse_mode=None
+    )
 
 
 # --- Flask Webhook Routes ---
@@ -751,7 +825,7 @@ def main() -> None:
     app_builder.post_shutdown(post_shutdown)
     application = app_builder.build()
     application.add_handler(CommandHandler("start", user.start)) # Use user.start
-    application.add_handler(CommandHandler("admin", admin.handle_admin_menu)) # Use admin.handle_admin_menu
+    application.add_handler(CommandHandler("admin", handle_admin_command)) # Route to admin or worker panel
     application.add_handler(CallbackQueryHandler(handle_callback_query))
     application.add_handler(MessageHandler(
         (filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL,

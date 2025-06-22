@@ -47,7 +47,9 @@ from utils import (
     _get_lang_data,  # <<<===== IMPORT THE HELPER =====>>>
     # <<< Admin Logging >>>
     log_admin_action, ACTION_RESELLER_DISCOUNT_DELETE, # Import logging helper and action constant
-    ACTION_PRODUCT_TYPE_REASSIGN # <<< ADDED for reassign type log
+    ACTION_PRODUCT_TYPE_REASSIGN, # <<< ADDED for reassign type log
+    # <<< Worker Management >>>
+    get_workers, add_worker, remove_worker, is_worker # <<< NEW: Worker management functions
 )
 # --- Import viewer admin handlers ---
 # These now include the user management handlers
@@ -439,6 +441,7 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         [InlineKeyboardButton("🔍 Search User", callback_data="adm_search_user_start")],
         [InlineKeyboardButton("👑 Manage Resellers", callback_data="manage_resellers_menu")],
         [InlineKeyboardButton("🏷️ Manage Reseller Discounts", callback_data="manage_reseller_discounts_select_reseller|0")],
+        [InlineKeyboardButton("👷 Manage Workers", callback_data="adm_manage_workers")],
         [InlineKeyboardButton("🏷️ Manage Discount Codes", callback_data="adm_manage_discounts")],
         [InlineKeyboardButton("👋 Manage Welcome Msg", callback_data="adm_manage_welcome|0")],
         [InlineKeyboardButton("📦 View Bot Stock", callback_data="view_stock")],
@@ -4995,3 +4998,256 @@ async def handle_adm_user_overview(update: Update, context: ContextTypes.DEFAULT
     
     # Redisplay the overview
     await display_user_search_results(context.bot, query.message.chat_id, dict(user_info))
+
+
+# --- Worker Management Handlers ---
+async def handle_adm_manage_workers(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Display worker management menu."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Access denied.", show_alert=True)
+    
+    workers = get_workers()
+    
+    msg = "👷 Worker Management\n\n"
+    if workers:
+        msg += f"Current Workers ({len(workers)}):\n"
+        for worker in workers:
+            username = worker['username'] or f"ID_{worker['user_id']}"
+            added_by_username = worker['added_by_username'] or "Unknown"
+            msg += f"• @{username} (added by @{added_by_username})\n"
+    else:
+        msg += "No workers configured."
+    
+    msg += "\nWorkers can access the worker panel via /admin and add drops to existing product types."
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Add Worker", callback_data="adm_add_worker")],
+        [InlineKeyboardButton("🗑️ Remove Worker", callback_data="adm_remove_worker")],
+        [InlineKeyboardButton("⬅️ Back to Admin Menu", callback_data="admin_menu")]
+    ]
+    
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+async def handle_adm_add_worker(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Start add worker flow."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Access denied.", show_alert=True)
+    
+    context.user_data['state'] = 'awaiting_worker_username'
+    
+    msg = (f"➕ Add New Worker\n\n"
+           f"Please enter the Telegram username of the person you want to add as a worker.\n\n"
+           f"Format: @username or username\n\n"
+           f"Workers will be able to:\n"
+           f"• Access worker panel via /admin\n"
+           f"• Add single drops to existing product types\n"
+           f"• Bulk add drops to existing product types\n"
+           f"• Cannot create new product types, cities, or set prices")
+    
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="adm_manage_workers")]]
+    
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    await query.answer("Enter username in chat.")
+
+async def handle_adm_remove_worker(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Show list of workers to remove."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Access denied.", show_alert=True)
+    
+    workers = get_workers()
+    
+    if not workers:
+        await query.answer("No workers to remove.", show_alert=True)
+        return
+    
+    msg = "🗑️ Remove Worker\n\nSelect a worker to remove:"
+    keyboard = []
+    
+    for worker in workers:
+        username = worker['username'] or f"ID_{worker['user_id']}"
+        keyboard.append([InlineKeyboardButton(f"🗑️ @{username}", callback_data=f"adm_confirm_remove_worker|{worker['user_id']}")])
+    
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="adm_manage_workers")])
+    
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+async def handle_adm_confirm_remove_worker(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Confirm worker removal."""
+    query = update.callback_query
+    if query.from_user.id != ADMIN_ID:
+        return await query.answer("Access denied.", show_alert=True)
+    
+    if not params or not params[0]:
+        return await query.answer("Invalid worker ID.", show_alert=True)
+    
+    try:
+        worker_user_id = int(params[0])
+    except ValueError:
+        return await query.answer("Invalid worker ID format.", show_alert=True)
+    
+    # Get worker info
+    workers = get_workers()
+    worker_info = next((w for w in workers if w['user_id'] == worker_user_id), None)
+    
+    if not worker_info:
+        await query.answer("Worker not found.", show_alert=True)
+        return
+    
+    username = worker_info['username'] or f"ID_{worker_user_id}"
+    
+    msg = f"⚠️ Confirm Worker Removal\n\nAre you sure you want to remove @{username} as a worker?\n\nThey will lose access to the worker panel immediately."
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, Remove Worker", callback_data=f"adm_execute_remove_worker|{worker_user_id}")],
+        [InlineKeyboardButton("❌ No, Cancel", callback_data="adm_remove_worker")]
+    ]
+    
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+async def handle_adm_execute_remove_worker(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
+    """Execute worker removal."""
+    query = update.callback_query
+    admin_id = query.from_user.id
+    
+    if admin_id != ADMIN_ID:
+        return await query.answer("Access denied.", show_alert=True)
+    
+    if not params or not params[0]:
+        return await query.answer("Invalid worker ID.", show_alert=True)
+    
+    try:
+        worker_user_id = int(params[0])
+    except ValueError:
+        return await query.answer("Invalid worker ID format.", show_alert=True)
+    
+    # Get worker info before removal
+    workers = get_workers()
+    worker_info = next((w for w in workers if w['user_id'] == worker_user_id), None)
+    
+    if not worker_info:
+        await query.answer("Worker not found.", show_alert=True)
+        return
+    
+    username = worker_info['username'] or f"ID_{worker_user_id}"
+    
+    # Remove worker
+    success = remove_worker(worker_user_id)
+    
+    if success:
+        # Log admin action
+        log_admin_action(
+            admin_id=admin_id,
+            action="WORKER_REMOVED",
+            target_user_id=worker_user_id,
+            reason=f"Removed worker @{username}"
+        )
+        
+        success_msg = f"✅ Worker Removed\n\n@{username} has been removed as a worker and no longer has access to the worker panel."
+        
+        keyboard = [[InlineKeyboardButton("👷 Manage Workers", callback_data="adm_manage_workers")]]
+        
+        await query.edit_message_text(success_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    else:
+        await query.answer("❌ Failed to remove worker. Please try again.", show_alert=True)
+
+async def handle_adm_worker_username_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle worker username input."""
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+    
+    username_text = update.message.text.strip()
+    
+    # Clean username (remove @ if present)
+    if username_text.startswith('@'):
+        username_text = username_text[1:]
+    
+    if not username_text:
+        await send_message_with_retry(context.bot, update.effective_chat.id, "❌ Username cannot be empty. Please try again.", parse_mode=None)
+        return
+    
+    # Basic username validation
+    if not username_text.replace('_', '').isalnum():
+        await send_message_with_retry(context.bot, update.effective_chat.id, "❌ Invalid username format. Please enter a valid Telegram username.", parse_mode=None)
+        return
+    
+    context.user_data['pending_worker_username'] = username_text
+    context.user_data['state'] = 'awaiting_worker_user_id'
+    
+    msg = (f"👷 Add Worker: @{username_text}\n\n"
+           f"Please provide the Telegram User ID for @{username_text}.\n\n"
+           f"You can get this by:\n"
+           f"1. Asking them to message the bot\n"
+           f"2. Using @userinfobot to get their ID\n"
+           f"3. Looking at their message info in other bots\n\n"
+           f"Enter the numeric User ID:")
+    
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="adm_manage_workers")]]
+    
+    await send_message_with_retry(context.bot, update.effective_chat.id, msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+
+async def handle_adm_worker_user_id_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle worker user ID input."""
+    if not update.message or not update.effective_user:
+        return
+    
+    admin_id = update.effective_user.id
+    if admin_id != ADMIN_ID:
+        return
+    
+    user_id_text = update.message.text.strip()
+    pending_username = context.user_data.get('pending_worker_username')
+    
+    if not pending_username:
+        await send_message_with_retry(context.bot, update.effective_chat.id, "❌ Session expired. Please start over.", parse_mode=None)
+        context.user_data.pop('state', None)
+        return
+    
+    try:
+        worker_user_id = int(user_id_text)
+        if worker_user_id <= 0:
+            raise ValueError("User ID must be positive")
+    except ValueError:
+        await send_message_with_retry(context.bot, update.effective_chat.id, "❌ Invalid User ID. Please enter a numeric User ID.", parse_mode=None)
+        return
+    
+    # Check if user is already a worker
+    if is_worker(worker_user_id):
+        await send_message_with_retry(context.bot, update.effective_chat.id, "❌ This user is already a worker.", parse_mode=None)
+        return
+    
+    # Check if user is admin
+    if worker_user_id == ADMIN_ID:
+        await send_message_with_retry(context.bot, update.effective_chat.id, "❌ Cannot add admin as worker.", parse_mode=None)
+        return
+    
+    # Add worker
+    success = add_worker(worker_user_id, pending_username, admin_id)
+    
+    context.user_data.pop('state', None)
+    context.user_data.pop('pending_worker_username', None)
+    
+    if success:
+        # Log admin action
+        log_admin_action(
+            admin_id=admin_id,
+            action="WORKER_ADDED",
+            target_user_id=worker_user_id,
+            reason=f"Added worker @{pending_username}"
+        )
+        
+        success_msg = (f"✅ Worker Added Successfully!\n\n"
+                      f"@{pending_username} (ID: {worker_user_id}) has been added as a worker.\n\n"
+                      f"They can now access the worker panel by typing /admin and will be able to add drops to existing product types.")
+        
+        keyboard = [[InlineKeyboardButton("👷 Manage Workers", callback_data="adm_manage_workers")]]
+        
+        await send_message_with_retry(context.bot, update.effective_chat.id, success_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    else:
+        await send_message_with_retry(context.bot, update.effective_chat.id, "❌ Failed to add worker (may already exist). Please try again.", parse_mode=None)
