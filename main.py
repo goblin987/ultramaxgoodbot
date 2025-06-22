@@ -411,6 +411,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Worker Panel States (reuse admin handlers since workers use same flow)
         # Workers use the same state names as admin but are distinguished by is_worker flag
+        'awaiting_bulk_custom_size': admin.handle_adm_bulk_custom_size_message,
+        'awaiting_bulk_price': admin.handle_adm_bulk_price_message,
+        'awaiting_bulk_drop_details': admin.handle_adm_bulk_drop_details_message,
     }
 
     handler_func = STATE_HANDLERS.get(state)

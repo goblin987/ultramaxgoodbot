@@ -52,33 +52,61 @@ async def handle_worker_panel(update: Update, context: ContextTypes.DEFAULT_TYPE
 # Worker functions that reuse admin logic
 async def handle_worker_city(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Worker city selection - reuses admin logic."""
-    from admin import handle_adm_city
     query = update.callback_query
     if not is_worker(query.from_user.id): 
         return await query.answer("Access denied.", show_alert=True)
     
-    # Temporarily set admin context and call admin function
-    original_id = query.from_user.id
-    query.from_user.id = 1  # Temporary admin ID for permission check
+    # Set worker context and call admin function directly
     context.user_data["is_worker"] = True
-    context.user_data["worker_id"] = original_id
+    context.user_data["worker_id"] = query.from_user.id
     
-    try:
-        await handle_adm_city(update, context, params)
-        # Modify callback data to use worker handlers
-        if hasattr(update, 'callback_query') and update.callback_query.message:
-            # Update the callback data in the message to use worker handlers
-            pass
-    finally:
-        query.from_user.id = original_id
+    # Call admin function with worker context
+    lang, lang_data = _get_lang_data(context)
+    if not CITIES:
+        return await query.edit_message_text("No cities configured. Please contact an admin.", parse_mode=None)
+    
+    sorted_city_ids = sorted(CITIES.keys(), key=lambda city_id: CITIES.get(city_id, ''))
+    keyboard = [[InlineKeyboardButton(f"🏙️ {CITIES.get(c,'N/A')}", callback_data=f"worker_dist|{c}")] for c in sorted_city_ids]
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="worker_panel")])
+    
+    select_city_text = lang_data.get("admin_select_city", "Select City to Add Product:")
+    await query.edit_message_text(select_city_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
-# Placeholder functions for other worker handlers
 async def handle_worker_dist(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Worker district selection."""
-    from admin import handle_adm_dist
-    if not is_worker(update.callback_query.from_user.id): 
-        return await update.callback_query.answer("Access denied.", show_alert=True)
-    await handle_adm_dist(update, context, params)
+    query = update.callback_query
+    if not is_worker(query.from_user.id): 
+        return await query.answer("Access denied.", show_alert=True)
+    
+    if not params: 
+        return await query.answer("Error: City ID missing.", show_alert=True)
+    
+    city_id = params[0]
+    city_name = CITIES.get(city_id)
+    if not city_name:
+        return await query.edit_message_text("Error: City not found. Please select again.", parse_mode=None)
+    
+    districts_in_city = DISTRICTS.get(city_id, {})
+    lang, lang_data = _get_lang_data(context)
+    select_district_template = lang_data.get("admin_select_district", "Select District in {city}:")
+    
+    if not districts_in_city:
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Cities", callback_data="worker_city")]]
+        return await query.edit_message_text(f"No districts found for {city_name}. Please contact an admin.",
+                                reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    
+    sorted_district_ids = sorted(districts_in_city.keys(), key=lambda dist_id: districts_in_city.get(dist_id,''))
+    keyboard = []
+    for d in sorted_district_ids:
+        dist_name = districts_in_city.get(d)
+        if dist_name:
+            keyboard.append([InlineKeyboardButton(f"🏘️ {dist_name}", callback_data=f"worker_type|{city_id}|{d}")])
+        else: 
+            logger.warning(f"District name missing for ID {d} in city {city_id}")
+    
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Cities", callback_data="worker_city")])
+    select_district_text = select_district_template.format(city=city_name)
+    await query.edit_message_text(select_district_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
 async def handle_close_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Close menu."""

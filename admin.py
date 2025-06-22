@@ -290,7 +290,7 @@ async def handle_adm_drop_details_message(update: Update, context: ContextTypes.
     chat_id = update.effective_chat.id
     user_specific_data = context.user_data
 
-    if user_id != ADMIN_ID: return
+    if user_id != ADMIN_ID and not is_worker(user_id): return
 
     if user_specific_data.get("state") != "awaiting_drop_details":
         logger.debug(f"Ignoring drop details message from user {user_id}, state is not 'awaiting_drop_details' (state: {user_specific_data.get('state')})")
@@ -980,7 +980,7 @@ async def handle_adm_bulk_custom_size_message(update: Update, context: ContextTy
     """Handles the custom size reply for bulk products."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    if user_id != ADMIN_ID: return
+    if user_id != ADMIN_ID and not is_worker(user_id): return
     if not update.message or not update.message.text: return
     if context.user_data.get("state") != "awaiting_bulk_custom_size": return
 
@@ -998,7 +998,7 @@ async def handle_adm_bulk_price_message(update: Update, context: ContextTypes.DE
     """Handles the price reply for bulk products."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    if user_id != ADMIN_ID: return
+    if user_id != ADMIN_ID and not is_worker(user_id): return
     if not update.message or not update.message.text: return
     if context.user_data.get("state") != "awaiting_bulk_price": return
 
@@ -3735,7 +3735,7 @@ async def handle_adm_custom_size_message(update: Update, context: ContextTypes.D
     """Handles text reply when state is 'awaiting_custom_size'."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    if user_id != ADMIN_ID: return
+    if user_id != ADMIN_ID and not is_worker(user_id): return
     if not update.message or not update.message.text: return
     if context.user_data.get("state") != "awaiting_custom_size": return
     custom_size = update.message.text.strip()
@@ -3755,7 +3755,7 @@ async def handle_adm_price_message(update: Update, context: ContextTypes.DEFAULT
     """Handles price input for regular product adding."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    if user_id != ADMIN_ID: return
+    if user_id != ADMIN_ID and not is_worker(user_id): return
     if not update.message or not update.message.text: return
     if context.user_data.get("state") != "awaiting_price": return
     
