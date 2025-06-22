@@ -2219,6 +2219,173 @@ async def handle_adm_set_discount_type(update: Update, context: ContextTypes.DEF
              await query.answer("Error updating prompt. Please try again.", show_alert=True)
         else: await query.answer()
 
+# --- NEW: Admin Discount Code Message Handlers ---
+async def process_discount_code_input(update: Update, context: ContextTypes.DEFAULT_TYPE, code_text: str):
+    """Process discount code input and move to discount type selection."""
+    query = update.callback_query
+    
+    # Validate the code
+    if not code_text or len(code_text.strip()) < 2:
+        await query.answer("Code too short. Please try again.", show_alert=True)
+        return await handle_adm_add_discount_start(update, context)
+    
+    code_text = code_text.strip().upper()  # Normalize case
+    
+    # Check if code already exists
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT code FROM discount_codes WHERE UPPER(code) = ?", (code_text,))
+        existing_code = c.fetchone()
+        if existing_code:
+            await query.answer("Code already exists. Please choose another.", show_alert=True)
+            return await handle_adm_add_discount_start(update, context)
+    except sqlite3.Error as e:
+        logger.error(f"Error checking duplicate discount code: {e}")
+        await query.answer("Database error. Please try again.", show_alert=True)
+        return await handle_adm_manage_discounts(update, context)
+    finally:
+        if conn: conn.close()
+    
+    # Store the code and move to type selection
+    context.user_data['new_discount_info'] = {'code': code_text}
+    context.user_data['state'] = 'awaiting_discount_type'
+    
+    msg = f"Code: {code_text}\n\nSelect discount type:"
+    keyboard = [
+        [InlineKeyboardButton("📊 Percentage (%)", callback_data="adm_set_discount_type|percentage")],
+        [InlineKeyboardButton("💰 Fixed Amount (EUR)", callback_data="adm_set_discount_type|fixed")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="adm_manage_discounts")]
+    ]
+    
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    await query.answer("Select discount type.")
+
+
+async def handle_adm_discount_code_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles admin entering discount code via message."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if user_id != ADMIN_ID: return
+    if context.user_data.get("state") != "awaiting_discount_code": return
+    if not update.message or not update.message.text: return
+    
+    code_text = update.message.text.strip()
+    context.user_data.pop('state', None)
+    
+    # Delete the user's message
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
+    except Exception as e:
+        logger.warning(f"Could not delete admin's discount code message: {e}")
+    
+    # Create a fake update for process_discount_code_input
+    from types import SimpleNamespace
+    fake_query = SimpleNamespace()
+    fake_query.from_user = update.effective_user
+    fake_query.message = update.message
+    fake_query.answer = lambda text, show_alert=False: asyncio.create_task(asyncio.sleep(0))
+    fake_query.edit_message_text = update.message.edit_text
+    
+    fake_update = SimpleNamespace()
+    fake_update.callback_query = fake_query
+    
+    await process_discount_code_input(fake_update, context, code_text)
+
+
+async def handle_adm_discount_value_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles admin entering discount value via message."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if user_id != ADMIN_ID: return
+    if context.user_data.get("state") != "awaiting_discount_value": return
+    if not update.message or not update.message.text: return
+    
+    value_text = update.message.text.strip()
+    context.user_data.pop('state', None)
+    
+    discount_info = context.user_data.get('new_discount_info', {})
+    discount_type = discount_info.get('type')
+    code_text = discount_info.get('code')
+    
+    if not discount_type or not code_text:
+        await send_message_with_retry(context.bot, chat_id, "❌ Error: Context lost. Please start again.", parse_mode=None)
+        context.user_data.pop('new_discount_info', None)
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Discount Management", callback_data="adm_manage_discounts")]]
+        await send_message_with_retry(context.bot, chat_id, "Returning to discount management.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        return
+    
+    # Validate value
+    try:
+        value = float(value_text)
+        if value <= 0:
+            await send_message_with_retry(context.bot, chat_id, "❌ Value must be greater than 0.", parse_mode=None)
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="adm_manage_discounts")]]
+            await send_message_with_retry(context.bot, chat_id, "Please try again.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+            return
+        
+        if discount_type == 'percentage' and value > 100:
+            await send_message_with_retry(context.bot, chat_id, "❌ Percentage cannot exceed 100%.", parse_mode=None)
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="adm_manage_discounts")]]
+            await send_message_with_retry(context.bot, chat_id, "Please try again.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+            return
+        
+        if discount_type == 'fixed' and value > 10000:
+            await send_message_with_retry(context.bot, chat_id, "❌ Fixed amount too high (max 10000 EUR).", parse_mode=None)
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="adm_manage_discounts")]]
+            await send_message_with_retry(context.bot, chat_id, "Please try again.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+            return
+            
+    except ValueError:
+        await send_message_with_retry(context.bot, chat_id, "❌ Invalid number format. Please enter a valid number.", parse_mode=None)
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="adm_manage_discounts")]]
+        await send_message_with_retry(context.bot, chat_id, "Please try again.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        return
+    
+    # Delete the user's message
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
+    except Exception as e:
+        logger.warning(f"Could not delete admin's discount value message: {e}")
+    
+    # Store value and create the discount code
+    discount_info['value'] = value
+    
+    # Create discount in database
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # Insert new discount code
+        c.execute("""
+            INSERT INTO discount_codes (code, discount_type, value, is_active, max_uses, uses_count, created_date)
+            VALUES (?, ?, ?, 1, NULL, 0, ?)
+        """, (code_text, discount_type, value, datetime.now(timezone.utc).isoformat()))
+        
+        conn.commit()
+        
+        value_display = f"{value}%" if discount_type == 'percentage' else f"{value} EUR"
+        success_msg = f"✅ Discount code created successfully!\n\nCode: {code_text}\nType: {discount_type.capitalize()}\nValue: {value_display}"
+        
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Discount Management", callback_data="adm_manage_discounts")]]
+        await send_message_with_retry(context.bot, chat_id, success_msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+        
+        logger.info(f"Admin {user_id} created discount code: {code_text} ({discount_type}, {value})")
+        
+    except sqlite3.Error as e:
+        logger.error(f"Error creating discount code: {e}")
+        await send_message_with_retry(context.bot, chat_id, "❌ Database error creating discount code. Please try again.", parse_mode=None)
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Discount Management", callback_data="adm_manage_discounts")]]
+        await send_message_with_retry(context.bot, chat_id, "Returning to discount management.", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
+    finally:
+        if conn: conn.close()
+    
+    # Clean up context
+    context.user_data.pop('new_discount_info', None)
+
+
 # --- Set Bot Media Handlers ---
 async def handle_adm_set_media(update: Update, context: ContextTypes.DEFAULT_TYPE, params=None):
     """Handles 'Set Bot Media' button press."""

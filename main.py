@@ -102,6 +102,8 @@ from admin import (
     # User detail handlers
     handle_adm_user_deposits, handle_adm_user_purchases, handle_adm_user_actions,
     handle_adm_user_discounts, handle_adm_user_overview,
+    # Discount code message handlers
+    handle_adm_discount_code_message, handle_adm_discount_value_message,
 )
 from viewer_admin import (
     handle_viewer_admin_menu,
@@ -363,6 +365,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # User Search States (from admin.py)
         'awaiting_search_username': admin.handle_adm_search_username_message,
+        
+        # Discount Code Management States (from admin.py)
+        'awaiting_discount_code': admin.handle_adm_discount_code_message,
+        'awaiting_discount_value': admin.handle_adm_discount_value_message,
     }
 
     handler_func = STATE_HANDLERS.get(state)
