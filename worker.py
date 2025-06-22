@@ -15,7 +15,7 @@ import telegram.error as telegram_error
 from utils import (
     get_db_connection, format_currency, send_message_with_retry,
     is_worker, CITIES, DISTRICTS, PRODUCT_TYPES, DEFAULT_PRODUCT_EMOJI,
-    SIZES, MEDIA_DIR, MEDIA_GROUP_COLLECTION_DELAY, logger, _get_lang_data
+    SIZES, MEDIA_DIR, logger, _get_lang_data
 )
 
 # Worker Panel Functions
