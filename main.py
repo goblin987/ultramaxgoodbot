@@ -312,19 +312,24 @@ def callback_query_router(func):
                 
                 # Worker Panel Handlers (from worker.py)
                 "worker_panel": worker.handle_worker_panel,
-                "worker_add_drop": worker.handle_worker_add_drop,
                 "worker_city": worker.handle_worker_city,
-                "worker_district": worker.handle_worker_district,
+                "worker_dist": worker.handle_worker_dist,
                 "worker_type": worker.handle_worker_type,
+                "worker_add": worker.handle_worker_add,
                 "worker_size": worker.handle_worker_size,
                 "worker_custom_size": worker.handle_worker_custom_size,
-                "worker_confirm_add_drop": worker.handle_worker_confirm_add_drop,
-                "worker_bulk_add": worker.handle_worker_bulk_add,
+                "worker_cancel_add": worker.handle_worker_cancel_add,
+                # Worker Bulk Handlers
                 "worker_bulk_city": worker.handle_worker_bulk_city,
-                "worker_bulk_city_selected": worker.handle_worker_bulk_city_selected,
-                "worker_bulk_district": worker.handle_worker_bulk_district,
+                "worker_bulk_dist": worker.handle_worker_bulk_dist,
                 "worker_bulk_type": worker.handle_worker_bulk_type,
-                "worker_bulk_process": worker.handle_worker_bulk_process,
+                "worker_bulk_add": worker.handle_worker_bulk_add,
+                "worker_bulk_size": worker.handle_worker_bulk_size,
+                "worker_bulk_custom_size": worker.handle_worker_bulk_custom_size,
+                "worker_bulk_create_all": worker.handle_worker_bulk_create_all,
+                "worker_bulk_remove_last_message": worker.handle_worker_bulk_remove_last_message,
+                "worker_bulk_back_to_management": worker.handle_worker_bulk_back_to_management,
+                "worker_cancel_bulk_add": worker.handle_worker_cancel_bulk_add,
                 "close_menu": worker.handle_close_menu,
             }
 
@@ -404,11 +409,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'awaiting_worker_username': admin.handle_adm_worker_username_message,
         'awaiting_worker_user_id': admin.handle_adm_worker_user_id_message,
         
-        # Worker Panel States (from worker.py)
-        'awaiting_worker_custom_size': worker.handle_worker_custom_size_message,
-        'awaiting_worker_drop_details': worker.handle_worker_drop_details_message,
-        'awaiting_worker_price': worker.handle_worker_price_message,
-        'awaiting_worker_bulk_messages': worker.handle_worker_bulk_messages,
+        # Worker Panel States (reuse admin handlers since workers use same flow)
+        # Workers use the same state names as admin but are distinguished by is_worker flag
     }
 
     handler_func = STATE_HANDLERS.get(state)

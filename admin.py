@@ -807,10 +807,19 @@ async def handle_confirm_add_drop(update: Update, context: ContextTypes.DEFAULT_
         conn.commit(); logger.info(f"Added product {product_id} ({product_name}).")
         if temp_dir and await asyncio.to_thread(os.path.exists, temp_dir): await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True); logger.info(f"Cleaned temp dir: {temp_dir}")
         await query.edit_message_text("✅ Drop Added Successfully!", parse_mode=None)
+        
+        # Check if this is a worker operation
+        is_worker_op = user_specific_data.get("is_worker", False)
         ctx_city_id = user_specific_data.get('admin_city_id'); ctx_dist_id = user_specific_data.get('admin_district_id'); ctx_p_type = user_specific_data.get('admin_product_type')
-        add_another_callback = f"adm_add|{ctx_city_id}|{ctx_dist_id}|{ctx_p_type}" if all([ctx_city_id, ctx_dist_id, ctx_p_type]) else "admin_menu"
-        keyboard = [ [InlineKeyboardButton("➕ Add Another Same Type", callback_data=add_another_callback)],
-                     [InlineKeyboardButton("🔧 Admin Menu", callback_data="admin_menu"), InlineKeyboardButton("🏠 User Home", callback_data="back_start")] ]
+        
+        if is_worker_op:
+            add_another_callback = f"worker_add|{ctx_city_id}|{ctx_dist_id}|{ctx_p_type}" if all([ctx_city_id, ctx_dist_id, ctx_p_type]) else "worker_panel"
+            keyboard = [ [InlineKeyboardButton("➕ Add Another Same Type", callback_data=add_another_callback)],
+                         [InlineKeyboardButton("👷 Worker Panel", callback_data="worker_panel"), InlineKeyboardButton("🏠 User Home", callback_data="back_start")] ]
+        else:
+            add_another_callback = f"adm_add|{ctx_city_id}|{ctx_dist_id}|{ctx_p_type}" if all([ctx_city_id, ctx_dist_id, ctx_p_type]) else "admin_menu"
+            keyboard = [ [InlineKeyboardButton("➕ Add Another Same Type", callback_data=add_another_callback)],
+                         [InlineKeyboardButton("🔧 Admin Menu", callback_data="admin_menu"), InlineKeyboardButton("🏠 User Home", callback_data="back_start")] ]
         await send_message_with_retry(context.bot, chat_id, "What next?", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
     except (sqlite3.Error, OSError, Exception) as e:
         try: conn.rollback() if conn and conn.in_transaction else None
